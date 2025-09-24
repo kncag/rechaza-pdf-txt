@@ -1,4 +1,4 @@
-# streamlit_app_unified.py
+# streamlit_app_unified_final.py
 import streamlit as st
 import fitz              # pip install PyMuPDF
 import re
@@ -32,7 +32,7 @@ KEYWORDS_NO_TITULAR = [
 
 # --- Helpers comunes ---
 def parse_importe_to_float(raw):
-    if not raw:
+    if raw is None:
         return 0.0
     s = str(raw).strip()
     s = re.sub(r'[^\d,.-]', '', s)
@@ -126,13 +126,25 @@ def get_col_by_letter_from_row(row, letter):
     return "" if pd.isna(val) else str(val).strip()
 
 def build_rows_from_excel_df(df):
+    """
+    Procesa el DataFrame comenzando en la fila 13 (índice 12).
+    Sólo incluye filas cuya columna O contenga información (no vacía después de strip).
+    """
     rows = []
-    for _, row in df.iterrows():
+    # Si hay menos de 13 filas, no hay datos a procesar
+    if df.shape[0] <= 12:
+        return rows
+    df_proc = df.iloc[12:].reset_index(drop=True)  # ahora index 0 == fila original 13
+
+    for _, row in df_proc.iterrows():
+        columna_O = get_col_by_letter_from_row(row, 'O')
+        if not columna_O:
+            continue  # saltar filas sin contenido en columna O
+
         dni = get_col_by_letter_from_row(row, 'E')
         nombre = get_col_by_letter_from_row(row, 'F')
         importe_raw = get_col_by_letter_from_row(row, 'N')
         referencia = get_col_by_letter_from_row(row, 'H')
-        columna_O = get_col_by_letter_from_row(row, 'O')
 
         importe = parse_importe_to_float(importe_raw)
         if contains_no_titular(columna_O):
@@ -152,6 +164,7 @@ def build_rows_from_excel_df(df):
     return rows
 
 # --- Streamlit UI ---
+st.set_page_config(layout="wide")
 st.title("RECHAZOS DE PAGOS MASIVOS — UNIFICADO")
 tabs = st.tabs(["PDF → TXT", "ZIP → Excel"])
 
@@ -207,7 +220,7 @@ with tabs[0]:
 # PESTAÑA 2: ZIP -> Excel
 with tabs[1]:
     st.subheader("Flujo ZIP → Excel")
-    st.write("Sube un ZIP que contenga un archivo Excel. Se generará el Excel con columnas solicitadas y lógica de rechazo según columna O.")
+    st.write("Sube un ZIP que contenga un archivo Excel. Procesa desde fila 13 y sólo filas con contenido en columna O.")
     zip_file = st.file_uploader("Sube ZIP con Excel", type=["zip"], key="zip_flow")
     if zip_file is not None:
         try:
@@ -216,6 +229,8 @@ with tabs[1]:
             st.success(f"Excel cargado: {df_excel.shape[0]} filas, {df_excel.shape[1]} columnas (primer archivo en el ZIP).")
 
             rows = build_rows_from_excel_df(df_excel)
+            if not rows:
+                st.warning("No se encontraron filas válidas desde la fila 13 con contenido en la columna O.")
             df_out = pd.DataFrame(rows, columns=[
                 "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
             ])
@@ -240,4 +255,4 @@ with tabs[1]:
             st.error(f"Ocurrió un error en el flujo ZIP→Excel: {e}")
 
 # Footer
-st.caption("Ajusta las posiciones de columnas si tu TXT o Excel tienen desplazamientos. Si quieres que el ZIP permita elegir entre varios xlsx, puedo añadir un selector.")
+st.caption("Ajusta las posiciones de columnas si tu TXT o Excel tienen desplazamientos. Si quieres elegir entre varios xlsx dentro del ZIP, lo agrego.")
