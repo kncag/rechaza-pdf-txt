@@ -1,4 +1,4 @@
-# streamlit_app.py
+# streamlit_app_updated.py
 import streamlit as st
 import fitz              # pip install PyMuPDF
 import re
@@ -13,10 +13,11 @@ COL_IMPORTE_START, COL_IMPORTE_END = 186, 195
 
 CODIGO_RECHAZO = "R001"
 RECHAZO_TXT = "DOCUMENTO ERRADO"
+ESTADO_FIJO = "rechazada"
 
 st.title("RECHAZOS DE PAGOS MASIVOS — Extraer Registros y Generar Excel")
 st.divider()
-st.write("Sube un PDF (contiene 'Registro N') y un TXT (línea 1 = registro 1). La app duplicará N, leerá esa línea del TXT y generará un Excel descargable.")
+st.write("Sube un PDF y un TXT. La app duplicará cada 'Registro N', leerá esa línea del TXT, extraerá campos y generará un Excel descargable con importe numérico.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -45,25 +46,65 @@ def slice_column_by_1based(line, start_1, end_1):
         return ""
     return line[start_idx:end_1].strip()
 
+def parse_importe_to_float(raw):
+    """
+    Normaliza y convierte una cadena de importe a float.
+    - Elimina espacios y símbolos de moneda.
+    - Detecta presencia de '.' y ',' y decide separador decimal.
+    - Si no puede convertir, devuelve 0.0
+    """
+    if not raw:
+        return 0.0
+    s = raw.strip()
+    # eliminar símbolos comunes de moneda y espacios
+    s = re.sub(r'[^\d,.-]', '', s)
+    if s == "":
+        return 0.0
+
+    # Si tiene ambos '.' y ',' asumimos que el separador de miles es '.' y decimal es ','
+    if '.' in s and ',' in s:
+        s = s.replace('.', '')       # quitar miles
+        s = s.replace(',', '.')      # convertir decimal a punto
+    else:
+        # Si sólo tiene comas y no puntos, asumimos coma decimal
+        if ',' in s and '.' not in s:
+            s = s.replace(',', '.')
+        # si sólo tiene puntos, se considera punto decimal (o miles si formato raro)
+        # dejamos tal cual
+
+    # Evitar casos con múltiples puntos tras reemplazos: mantener la última como decimal
+    if s.count('.') > 1:
+        parts = s.split('.')
+        integer = ''.join(parts[:-1])
+        decimal = parts[-1]
+        s = integer + '.' + decimal
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
 def build_rows_from_indices(line_indices, txt_lines):
     rows = []
     total = len(txt_lines)
     for idx in line_indices:
         if idx < 1 or idx > total:
-            dni = nombre = referencia = importe = ""
+            dni = nombre = referencia = ""
+            importe_val = 0.0
         else:
             line = txt_lines[idx - 1]
             dni = slice_column_by_1based(line, COL_DNI_START, COL_DNI_END)
             nombre = slice_column_by_1based(line, COL_NOMBRE_START, COL_NOMBRE_END)
             referencia = slice_column_by_1based(line, COL_REFERENCIA_START, COL_REFERENCIA_END)
-            importe = slice_column_by_1based(line, COL_IMPORTE_START, COL_IMPORTE_END)
+            raw_importe = slice_column_by_1based(line, COL_IMPORTE_START, COL_IMPORTE_END)
+            importe_val = parse_importe_to_float(raw_importe)
         rows.append({
             "dni/cex": dni,
             "nombre": nombre,
-            "importe": importe,
-            "REFERENCIA": referencia,
-            "codigo rechazo": CODIGO_RECHAZO,
-            "rechazo": RECHAZO_TXT
+            "importe": importe_val,
+            "Referencia": referencia,
+            "Estado": ESTADO_FIJO,
+            "Codigo de Rechazo": CODIGO_RECHAZO,
+            "Descripcion de Rechazo": RECHAZO_TXT
         })
     return rows
 
@@ -83,10 +124,19 @@ if pdf_file and txt_file:
             txt_lines = read_txt_lines_from_bytes(txt_bytes)
             rows = build_rows_from_indices(multiplied, txt_lines)
 
-            # Vista previa en DataFrame (limitado)
-            df = pd.DataFrame(rows, columns=["dni/cex", "nombre", "importe", "REFERENCIA", "codigo rechazo", "rechazo"])
+            # DataFrame con tipos adecuados
+            df = pd.DataFrame(rows, columns=[
+                "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
+            ])
+            # Asegurar tipo numérico
+            df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0.0)
+
             st.subheader("Vista previa (primeras 50 filas)")
             st.dataframe(df.head(50))
+
+            # Mostrar suma total de importes detectados
+            total_importe = df["importe"].sum()
+            st.markdown(f"**Suma de importe detectada:** {total_importe:,.2f}")
 
             # Guardar Excel en memoria y ofrecer descarga
             output = io.BytesIO()
