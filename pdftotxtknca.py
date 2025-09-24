@@ -1,4 +1,4 @@
-# streamlit_app_updated.py
+# streamlit_app_final.py
 import streamlit as st
 import fitz              # pip install PyMuPDF
 import re
@@ -14,18 +14,17 @@ COL_IMPORTE_START, COL_IMPORTE_END = 186, 195
 CODIGO_RECHAZO = "R001"
 RECHAZO_TXT = "DOCUMENTO ERRADO"
 ESTADO_FIJO = "rechazada"
+MULTIPLICADOR = 2  # fijo en 2, no expuesto en la UI
 
 st.title("RECHAZOS DE PAGOS MASIVOS — Extraer Registros y Generar Excel")
 st.divider()
-st.write("Sube un PDF y un TXT. La app duplicará cada 'Registro N', leerá esa línea del TXT, extraerá campos y generará un Excel descargable con importe numérico.")
+st.write("Sube un PDF y un TXT. La app extrae 'Registro N', multiplica N por 2, lee esa línea del TXT y genera un Excel descargable.")
 
 col1, col2 = st.columns(2)
 with col1:
     pdf_file = st.file_uploader("Sube PDF", type="pdf")
 with col2:
     txt_file = st.file_uploader("Sube TXT", type=["txt"])
-
-factor = st.number_input("Factor multiplicador", value=2, min_value=1, step=1)
 
 def extract_registros_from_pdf_bytes(pdf_bytes):
     text = ""
@@ -47,32 +46,18 @@ def slice_column_by_1based(line, start_1, end_1):
     return line[start_idx:end_1].strip()
 
 def parse_importe_to_float(raw):
-    """
-    Normaliza y convierte una cadena de importe a float.
-    - Elimina espacios y símbolos de moneda.
-    - Detecta presencia de '.' y ',' y decide separador decimal.
-    - Si no puede convertir, devuelve 0.0
-    """
     if not raw:
         return 0.0
     s = raw.strip()
-    # eliminar símbolos comunes de moneda y espacios
     s = re.sub(r'[^\d,.-]', '', s)
     if s == "":
         return 0.0
-
-    # Si tiene ambos '.' y ',' asumimos que el separador de miles es '.' y decimal es ','
     if '.' in s and ',' in s:
-        s = s.replace('.', '')       # quitar miles
-        s = s.replace(',', '.')      # convertir decimal a punto
+        s = s.replace('.', '')
+        s = s.replace(',', '.')
     else:
-        # Si sólo tiene comas y no puntos, asumimos coma decimal
         if ',' in s and '.' not in s:
             s = s.replace(',', '.')
-        # si sólo tiene puntos, se considera punto decimal (o miles si formato raro)
-        # dejamos tal cual
-
-    # Evitar casos con múltiples puntos tras reemplazos: mantener la última como decimal
     if s.count('.') > 1:
         parts = s.split('.')
         integer = ''.join(parts[:-1])
@@ -117,28 +102,23 @@ if pdf_file and txt_file:
         if not registros:
             st.warning("No se encontraron patrones 'Registro N' en el PDF.")
         else:
-            st.write("Registros encontrados (PDF):", registros)
-            multiplied = sorted({r * int(factor) for r in registros})
-            st.write(f"Después de multiplicar por {factor}:", multiplied)
+            # Multiplicación fija por 2 (sin mostrar listas intermedias)
+            indices = sorted({r * MULTIPLICADOR for r in registros})
 
             txt_lines = read_txt_lines_from_bytes(txt_bytes)
-            rows = build_rows_from_indices(multiplied, txt_lines)
+            rows = build_rows_from_indices(indices, txt_lines)
 
-            # DataFrame con tipos adecuados
             df = pd.DataFrame(rows, columns=[
                 "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
             ])
-            # Asegurar tipo numérico
             df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0.0)
 
             st.subheader("Vista previa (primeras 50 filas)")
             st.dataframe(df.head(50))
 
-            # Mostrar suma total de importes detectados
             total_importe = df["importe"].sum()
             st.markdown(f"**Suma de importe detectada:** {total_importe:,.2f}")
 
-            # Guardar Excel en memoria y ofrecer descarga
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Rechazos")
