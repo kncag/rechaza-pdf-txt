@@ -1,0 +1,1 @@
+# rechaza-pdf-txt
