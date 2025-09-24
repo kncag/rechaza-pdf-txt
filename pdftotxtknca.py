@@ -1,4 +1,4 @@
-# streamlit_app_unified_final.py
+# streamlit_app_unified_row12.py
 import streamlit as st
 import fitz              # pip install PyMuPDF
 import re
@@ -127,14 +127,14 @@ def get_col_by_letter_from_row(row, letter):
 
 def build_rows_from_excel_df(df):
     """
-    Procesa el DataFrame comenzando en la fila 13 (índice 12).
+    Procesa el DataFrame comenzando en la fila 12 (índice 11).
     Sólo incluye filas cuya columna O contenga información (no vacía después de strip).
     """
     rows = []
-    # Si hay menos de 13 filas, no hay datos a procesar
-    if df.shape[0] <= 12:
+    # Si hay menos de 12 filas, no hay datos a procesar
+    if df.shape[0] <= 11:
         return rows
-    df_proc = df.iloc[12:].reset_index(drop=True)  # ahora index 0 == fila original 13
+    df_proc = df.iloc[11:].reset_index(drop=True)  # ahora index 0 == fila original 12
 
     for _, row in df_proc.iterrows():
         columna_O = get_col_by_letter_from_row(row, 'O')
@@ -220,7 +220,7 @@ with tabs[0]:
 # PESTAÑA 2: ZIP -> Excel
 with tabs[1]:
     st.subheader("Flujo ZIP → Excel")
-    st.write("Sube un ZIP que contenga un archivo Excel. Procesa desde fila 13 y sólo filas con contenido en columna O.")
+    st.write("Sube un ZIP que contenga un archivo Excel. Procesa desde fila 12 y sólo filas con contenido en columna O.")
     zip_file = st.file_uploader("Sube ZIP con Excel", type=["zip"], key="zip_flow")
     if zip_file is not None:
         try:
@@ -230,7 +230,7 @@ with tabs[1]:
 
             rows = build_rows_from_excel_df(df_excel)
             if not rows:
-                st.warning("No se encontraron filas válidas desde la fila 13 con contenido en la columna O.")
+                st.warning("No se encontraron filas válidas desde la fila 12 con contenido en la columna O.")
             df_out = pd.DataFrame(rows, columns=[
                 "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
             ])
