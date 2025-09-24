@@ -1,4 +1,4 @@
-# streamlit_app_final.py
+# streamlit_app_with_selector.py
 import streamlit as st
 import fitz              # pip install PyMuPDF
 import re
@@ -11,14 +11,20 @@ COL_NOMBRE_START, COL_NOMBRE_END = 40, 85
 COL_REFERENCIA_START, COL_REFERENCIA_END = 115, 126
 COL_IMPORTE_START, COL_IMPORTE_END = 186, 195
 
-CODIGO_RECHAZO = "R001"
-RECHAZO_TXT = "DOCUMENTO ERRADO"
 ESTADO_FIJO = "rechazada"
 MULTIPLICADOR = 2  # fijo en 2, no expuesto en la UI
 
 st.title("RECHAZOS DE PAGOS MASIVOS — Extraer Registros y Generar Excel")
 st.divider()
 st.write("Sube un PDF y un TXT. La app extrae 'Registro N', multiplica N por 2, lee esa línea del TXT y genera un Excel descargable.")
+
+# Selector de código de rechazo (botón/selector)
+rechazo_opciones = {
+    "R002: CUENTA INVALIDA": ("R002", "CUENTA INVALIDA"),
+    "R001: DOCUMENTO ERRADO": ("R001", "DOCUMENTO ERRADO")
+}
+seleccion = st.selectbox("Elige Código de Rechazo", list(rechazo_opciones.keys()))
+CODIGO_RECHAZO, RECHAZO_TXT = rechazo_opciones[seleccion]
 
 col1, col2 = st.columns(2)
 with col1:
@@ -68,7 +74,7 @@ def parse_importe_to_float(raw):
     except ValueError:
         return 0.0
 
-def build_rows_from_indices(line_indices, txt_lines):
+def build_rows_from_indices(line_indices, txt_lines, codigo_rechazo, descripcion_rechazo):
     rows = []
     total = len(txt_lines)
     for idx in line_indices:
@@ -88,8 +94,8 @@ def build_rows_from_indices(line_indices, txt_lines):
             "importe": importe_val,
             "Referencia": referencia,
             "Estado": ESTADO_FIJO,
-            "Codigo de Rechazo": CODIGO_RECHAZO,
-            "Descripcion de Rechazo": RECHAZO_TXT
+            "Codigo de Rechazo": codigo_rechazo,
+            "Descripcion de Rechazo": descripcion_rechazo
         })
     return rows
 
@@ -106,7 +112,7 @@ if pdf_file and txt_file:
             indices = sorted({r * MULTIPLICADOR for r in registros})
 
             txt_lines = read_txt_lines_from_bytes(txt_bytes)
-            rows = build_rows_from_indices(indices, txt_lines)
+            rows = build_rows_from_indices(indices, txt_lines, CODIGO_RECHAZO, RECHAZO_TXT)
 
             df = pd.DataFrame(rows, columns=[
                 "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
