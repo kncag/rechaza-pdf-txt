@@ -3,4 +3,3 @@ pandas
 openpyxl
 PyMuPDF
 zipfile
-openpyxl
