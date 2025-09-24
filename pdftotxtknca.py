@@ -1,26 +1,102 @@
-# streamlit_app_with_zip_flow.py
+# streamlit_app_unified.py
 import streamlit as st
-import fitz              # si ya lo usas en la app principal
+import fitz              # pip install PyMuPDF
 import re
 import io
-import pandas as pd
+import pandas as pd      # pip install pandas openpyxl
 import zipfile
-from openpyxl import load_workbook
 
-# --- Constantes y mapeos ---
+# --- Constantes globales ---
+# Posiciones 1-based (flujo PDF->TXT)
+COL_DNI_START, COL_DNI_END = 25, 33
+COL_NOMBRE_START, COL_NOMBRE_END = 40, 85
+COL_REFERENCIA_START, COL_REFERENCIA_END = 115, 126
+COL_IMPORTE_START, COL_IMPORTE_END = 186, 195
+
 ESTADO_FIJO = "rechazada"
+MULTIPLICADOR = 2  # fijo para el flujo PDF->TXT
 
-# Rechazos alternativos
+# Rechazos para selector del flujo PDF->TXT
+RECHAZO_OPCIONES = {
+    "R002: CUENTA INVALIDA": ("R002", "CUENTA INVALIDA"),
+    "R001: DOCUMENTO ERRADO": ("R001", "DOCUMENTO ERRADO")
+}
+
+# Rechazos para flujo ZIP->Excel basado en Col O
 RECHAZO_R016 = ("R016", "CLIENTE NO TITULAR DE LA CUENTA")
 RECHAZO_R002 = ("R002", "CUENTA INVALIDA")
-
-# Palabras claves para detectar "no titular / continuar"
 KEYWORDS_NO_TITULAR = [
     "no es titular", "beneficiario no", "cliente no titular", "no titular",
     "continuar", "puedes continuar", "si deseas, puedes continuar", "continuar con"
 ]
 
-# Helper: extraer texto limpio y buscar coincidencias clave
+# --- Helpers comunes ---
+def parse_importe_to_float(raw):
+    if not raw:
+        return 0.0
+    s = str(raw).strip()
+    s = re.sub(r'[^\d,.-]', '', s)
+    if s == "":
+        return 0.0
+    if '.' in s and ',' in s:
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        if ',' in s and '.' not in s:
+            s = s.replace(',', '.')
+    if s.count('.') > 1:
+        parts = s.split('.')
+        s = ''.join(parts[:-1]) + '.' + parts[-1]
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+def slice_column_by_1based(line, start_1, end_1):
+    start_idx = max(0, start_1 - 1)
+    if start_idx >= len(line):
+        return ""
+    return line[start_idx:end_1].strip()
+
+# --- FLUJO A: PDF -> TXT -> Excel ---
+def extract_registros_from_pdf_bytes(pdf_bytes):
+    text = ""
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page in doc:
+            text += page.get_text()
+    matches = re.findall(r'Registro\s+(\d{1,5})', text, re.IGNORECASE)
+    nums = sorted({int(m) for m in matches})
+    return nums
+
+def read_txt_lines_from_bytes(txt_bytes):
+    s = txt_bytes.decode("utf-8", errors="replace")
+    return [ln.rstrip("\n\r") for ln in s.splitlines()]
+
+def build_rows_from_indices_pdf(indices, txt_lines, codigo_rechazo, descripcion_rechazo):
+    rows = []
+    total = len(txt_lines)
+    for idx in indices:
+        if idx < 1 or idx > total:
+            dni = nombre = referencia = ""
+            importe_val = 0.0
+        else:
+            line = txt_lines[idx - 1]
+            dni = slice_column_by_1based(line, COL_DNI_START, COL_DNI_END)
+            nombre = slice_column_by_1based(line, COL_NOMBRE_START, COL_NOMBRE_END)
+            referencia = slice_column_by_1based(line, COL_REFERENCIA_START, COL_REFERENCIA_END)
+            raw_importe = slice_column_by_1based(line, COL_IMPORTE_START, COL_IMPORTE_END)
+            importe_val = parse_importe_to_float(raw_importe)
+        rows.append({
+            "dni/cex": dni,
+            "nombre": nombre,
+            "importe": importe_val,
+            "Referencia": referencia,
+            "Estado": ESTADO_FIJO,
+            "Codigo de Rechazo": codigo_rechazo,
+            "Descripcion de Rechazo": descripcion_rechazo
+        })
+    return rows
+
+# --- FLUJO B: ZIP -> Excel -> transformar columnas por letra ---
 def contains_no_titular(text):
     if not isinstance(text, str):
         return False
@@ -30,65 +106,35 @@ def contains_no_titular(text):
             return True
     return False
 
-# Helper: leer primer xlsx dentro de un zip y devolver DataFrame (primera hoja)
 def read_first_excel_from_zip(zip_bytes):
     buf = io.BytesIO(zip_bytes)
     with zipfile.ZipFile(buf) as z:
-        # buscar primer archivo con extensión xlsx/xls
         candidates = [n for n in z.namelist() if n.lower().endswith((".xlsx", ".xls"))]
         if not candidates:
             raise ValueError("No se encontró ningún archivo Excel dentro del ZIP.")
         first = candidates[0]
         with z.open(first) as f:
-            # pandas puede leer bytes de Excel directamente
-            df = pd.read_excel(f, sheet_name=0, dtype=str)  # leer todo como str para evitar conversiones
+            df = pd.read_excel(f, sheet_name=0, dtype=str)
     return df
 
-# Helper: obtener valor por letra de columna (1-based)
-def get_col_by_letter(df_row, letter):
-    # convertir letra a índice 0-based
+def get_col_by_letter_from_row(row, letter):
     idx = ord(letter.upper()) - ord('A')
-    if idx < 0:
+    vals = list(row.values)
+    if idx >= len(vals) or idx < 0:
         return ""
-    # si DataFrame tiene columnas con nombres, podemos intentar acceder por posición
-    try:
-        # Convertir row a list de valores en orden
-        vals = list(df_row.values)
-        return "" if idx >= len(vals) else ("" if pd.isna(vals[idx]) else str(vals[idx]).strip())
-    except Exception:
-        return ""
+    val = vals[idx]
+    return "" if pd.isna(val) else str(val).strip()
 
-# Construir filas resultado desde df del excel extraído
 def build_rows_from_excel_df(df):
     rows = []
-    # iterar por cada fila del DataFrame
     for _, row in df.iterrows():
-        dni = get_col_by_letter(row, 'E')   # col E
-        nombre = get_col_by_letter(row, 'F') # col F
-        importe_raw = get_col_by_letter(row, 'N') # col N
-        referencia = get_col_by_letter(row, 'H') # col H
-        columna_O = get_col_by_letter(row, 'O')  # col O para decidir rechazo
+        dni = get_col_by_letter_from_row(row, 'E')
+        nombre = get_col_by_letter_from_row(row, 'F')
+        importe_raw = get_col_by_letter_from_row(row, 'N')
+        referencia = get_col_by_letter_from_row(row, 'H')
+        columna_O = get_col_by_letter_from_row(row, 'O')
 
-        # Normalizar importe (simple): quitar caracteres no numéricos y normalizar coma/punto
-        importe = 0.0
-        if importe_raw:
-            s = re.sub(r'[^\d,.-]', '', importe_raw)
-            if s:
-                # heurística simple de separadores
-                if '.' in s and ',' in s:
-                    s = s.replace('.', '').replace(',', '.')
-                elif ',' in s and '.' not in s:
-                    s = s.replace(',', '.')
-                # manejar múltiples puntos: conservar última como decimal
-                if s.count('.') > 1:
-                    parts = s.split('.')
-                    s = ''.join(parts[:-1]) + '.' + parts[-1]
-                try:
-                    importe = float(s)
-                except Exception:
-                    importe = 0.0
-
-        # decidir rechazo
+        importe = parse_importe_to_float(importe_raw)
         if contains_no_titular(columna_O):
             codigo, descripcion = RECHAZO_R016
         else:
@@ -105,43 +151,93 @@ def build_rows_from_excel_df(df):
         })
     return rows
 
-# --- Streamlit UI: segunda pestaña ---
-st.title("Flujo ZIP → Excel de Rechazos")
+# --- Streamlit UI ---
+st.title("RECHAZOS DE PAGOS MASIVOS — UNIFICADO")
+tabs = st.tabs(["PDF → TXT", "ZIP → Excel"])
 
-st.write("Sube un archivo ZIP que contenga un Excel. Se generará un Excel con las columnas: dni/cex, nombre, importe, Referencia, Estado, Codigo de Rechazo, Descripcion de Rechazo.")
+# PESTAÑA 1: PDF -> TXT
+with tabs[0]:
+    st.subheader("Flujo PDF → TXT")
+    st.write("Sube PDF y TXT. Extrae 'Registro N' del PDF, multiplica por 2 (interno), busca la línea en el TXT y genera el Excel.")
+    selected = st.selectbox("Elige Código de Rechazo (para este flujo)", list(RECHAZO_OPCIONES.keys()))
+    CODIGO_RECHAZO, RECHAZO_TXT = RECHAZO_OPCIONES[selected]
 
-zip_file = st.file_uploader("Sube ZIP con Excel", type=["zip"])
-if zip_file is not None:
-    try:
-        zip_bytes = zip_file.read()
-        df_excel = read_first_excel_from_zip(zip_bytes)
-        st.success(f"Excel cargado: {df_excel.shape[0]} filas, {df_excel.shape[1]} columnas (se usará el primer archivo Excel dentro del ZIP).")
+    col1, col2 = st.columns(2)
+    with col1:
+        pdf_file = st.file_uploader("Sube PDF", type="pdf", key="pdf_flow")
+    with col2:
+        txt_file = st.file_uploader("Sube TXT", type=["txt"], key="txt_flow")
 
-        rows = build_rows_from_excel_df(df_excel)
-        df_out = pd.DataFrame(rows, columns=[
-            "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
-        ])
-        df_out["importe"] = pd.to_numeric(df_out["importe"], errors="coerce").fillna(0.0)
+    if pdf_file and txt_file:
+        try:
+            pdf_bytes = pdf_file.read()
+            txt_bytes = txt_file.read()
+            registros = extract_registros_from_pdf_bytes(pdf_bytes)
+            if not registros:
+                st.warning("No se encontraron patrones 'Registro N' en el PDF.")
+            else:
+                # multiplicar internamente por 2 (sin exponer)
+                indices = sorted({r * MULTIPLICADOR for r in registros})
+                txt_lines = read_txt_lines_from_bytes(txt_bytes)
+                rows = build_rows_from_indices_pdf(indices, txt_lines, CODIGO_RECHAZO, RECHAZO_TXT)
 
-        st.subheader("Vista previa (primeras 50 filas)")
-        st.dataframe(df_out.head(50))
+                df = pd.DataFrame(rows, columns=[
+                    "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
+                ])
+                df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0.0)
 
-        st.markdown(f"**Suma total importe:** {df_out['importe'].sum():,.2f}")
+                st.subheader("Vista previa (primeras 50 filas)")
+                st.dataframe(df.head(50))
+                st.markdown(f"**Suma de importe detectada:** {df['importe'].sum():,.2f}")
 
-        # Generar Excel en memoria
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_out.to_excel(writer, index=False, sheet_name="Rechazos")
-        output.seek(0)
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="Rechazos")
+                output.seek(0)
 
-        st.download_button(
-            label="Descargar Excel generado",
-            data=output.getvalue(),
-            file_name="rechazos_desde_zip.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+                st.download_button(
+                    label="Descargar Excel (PDF→TXT)",
+                    data=output.getvalue(),
+                    file_name="rechazos_desde_pdf_txt.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        except Exception as e:
+            st.error(f"Ocurrió un error en el flujo PDF→TXT: {e}")
 
-    except Exception as e:
-        st.error(f"Ocurrió un error al procesar el ZIP/Excel: {e}")
-else:
-    st.info("Sube un ZIP que contenga al menos un archivo .xlsx o .xls.")
+# PESTAÑA 2: ZIP -> Excel
+with tabs[1]:
+    st.subheader("Flujo ZIP → Excel")
+    st.write("Sube un ZIP que contenga un archivo Excel. Se generará el Excel con columnas solicitadas y lógica de rechazo según columna O.")
+    zip_file = st.file_uploader("Sube ZIP con Excel", type=["zip"], key="zip_flow")
+    if zip_file is not None:
+        try:
+            zip_bytes = zip_file.read()
+            df_excel = read_first_excel_from_zip(zip_bytes)
+            st.success(f"Excel cargado: {df_excel.shape[0]} filas, {df_excel.shape[1]} columnas (primer archivo en el ZIP).")
+
+            rows = build_rows_from_excel_df(df_excel)
+            df_out = pd.DataFrame(rows, columns=[
+                "dni/cex", "nombre", "importe", "Referencia", "Estado", "Codigo de Rechazo", "Descripcion de Rechazo"
+            ])
+            df_out["importe"] = pd.to_numeric(df_out["importe"], errors="coerce").fillna(0.0)
+
+            st.subheader("Vista previa (primeras 50 filas)")
+            st.dataframe(df_out.head(50))
+            st.markdown(f"**Suma total importe:** {df_out['importe'].sum():,.2f}")
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_out.to_excel(writer, index=False, sheet_name="Rechazos")
+            output.seek(0)
+
+            st.download_button(
+                label="Descargar Excel (ZIP→Excel)",
+                data=output.getvalue(),
+                file_name="rechazos_desde_zip.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error(f"Ocurrió un error en el flujo ZIP→Excel: {e}")
+
+# Footer
+st.caption("Ajusta las posiciones de columnas si tu TXT o Excel tienen desplazamientos. Si quieres que el ZIP permita elegir entre varios xlsx, puedo añadir un selector.")
