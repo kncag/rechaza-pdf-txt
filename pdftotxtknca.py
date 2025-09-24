@@ -196,24 +196,28 @@ def build_rows_from_excel_df(df: pd.DataFrame, start_row: int = 12) -> List[Dict
     return rows
 
 # -----------------------
-# UI modular
+# UI modular (botones centrados)
 # -----------------------
 def pdf_txt_tab() -> None:
     st.header("Flujo PDF → TXT")
     st.write("Sube PDF y TXT. Extrae 'Registro N' del PDF, multiplica por 2 internamente, busca la línea en el TXT y genera el Excel.")
-    # Mostrar opción actual y selectbox sólo con las otras opciones
-    default_key = list(PDF_RECHAZOS.keys())[0]
-    selected_label_display = st.session_state.get("pdf_rechazo_selected", default_key)
-    st.write("Código de Rechazo actual:", f"**{selected_label_display}**")
-    # opciones de cambio: excluye la actualmente mostrada
-    other_opts = [k for k in PDF_RECHAZOS.keys() if k != selected_label_display]
-    change = st.selectbox("Cambiar a (opcional)", ["Mantener actual"] + other_opts, index=0)
-    if change != "Mantener actual":
-        selected_label = change
-        st.session_state["pdf_rechazo_selected"] = change
-    else:
-        selected_label = selected_label_display
-    codigo, descripcion = PDF_RECHAZOS[selected_label]
+
+    # Inicializar selección por defecto si no existe
+    if "pdf_rechazo_selected" not in st.session_state:
+        st.session_state["pdf_rechazo_selected"] = list(PDF_RECHAZOS.keys())[0]
+
+    # Mostrar dos botones pequeños centrados lado a lado
+    col_c1, col_c2, col_c3 = st.columns([1, 2, 1])
+    with col_c2:
+        cols = st.columns([1, 1], gap="small")
+        if cols[0].button("R002\nCUENTA INVALIDA", key="btn_r002"):
+            st.session_state["pdf_rechazo_selected"] = "R002: CUENTA INVALIDA"
+        if cols[1].button("R001\nDOCUMENTO ERRADO", key="btn_r001"):
+            st.session_state["pdf_rechazo_selected"] = "R001: DOCUMENTO ERRADO"
+
+    st.write("Código de Rechazo seleccionado:", f"**{st.session_state['pdf_rechazo_selected']}**")
+
+    codigo, descripcion = PDF_RECHAZOS[st.session_state["pdf_rechazo_selected"]]
 
     col1, col2 = st.columns(2)
     with col1:
@@ -281,7 +285,6 @@ def zip_excel_tab() -> None:
 
 def main() -> None:
     st.set_page_config(layout="centered", page_title="Rechazos MASIVOS")
-    # ancho opcional
     st.markdown(
         """
         <style>
