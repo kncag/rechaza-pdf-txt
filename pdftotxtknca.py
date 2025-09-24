@@ -288,7 +288,7 @@ def zip_excel_tab(default_start_row: int = 12) -> None:
         st.error(f"Ocurrió un error al procesar el ZIP/Excel: {e}")
 
 def main() -> None:
-    st.set_page_config(layout="wide", page_title="Rechazos MASIVOS")
+    st.set_page_config(layout="centered", page_title="Rechazos MASIVOS")
     st.title("RECHAZOS DE PAGOS MASIVOS — UNIFICADO")
     tab1, tab2 = st.tabs(["PDF → TXT", "ZIP → Excel"])
     with tab1:
