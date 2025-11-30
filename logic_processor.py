@@ -1,9 +1,7 @@
-# logic_processor.py
 import time
 import requests
 
 # --- CONFIGURACIÓN DE REINTENTOS ---
-# (Num Líneas, Max Reintentos)
 RECONCILE_RETRY_CONFIG = [
     (20,  3), (40,  4), (50,  5), (60,  8), (float("inf"), 10),
 ]
@@ -38,7 +36,8 @@ RULES_UDEP = [
     ("sub_YK5GU0000024", ["2103093"], [])
 ]
 
-# --- HELPERS ---
+# --- HELPERS (AQUÍ ESTÁ LA FUNCIÓN QUE FALTABA) ---
+
 def get_reconcile_retries(line_count):
     for max_lines, retries in RECONCILE_RETRY_CONFIG:
         if line_count <= max_lines: return retries
