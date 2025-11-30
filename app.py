@@ -57,42 +57,45 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
         fname = file.name
         status_text.markdown(f"**Procesando ({i+1}/{total_files}):** `{fname}`")
         
-        # Leer contenido
         content = file.getvalue()
         try: content_str = content.decode('utf-8', errors='ignore')
         except: content_str = ""
         
-        # 2. Identificar Suscripción
+        # --- LOGICA ---
         sub_id = logic.find_subscription_id(fname, rules)
         
         if not sub_id:
-            logs_expander.write(f"🚫 **{fname}**: No coincide con reglas de {sys_name}")
+            logs_expander.markdown(f"❌ **{fname}**: Ignorado (No match en {sys_name})")
             audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "🚫 Error Regla", 
                                "Detalles": "Nombre no reconocido", "Proc": 0, "Rec": 0})
         else:
-            # 3. Validar
             valido, razon, lineas = logic.validar_contenido(fname, content_str)
             if not valido:
-                logs_expander.write(f"⚠️ **{fname}**: Omitido por validación ({razon})")
+                logs_expander.markdown(f"⚠️ **{fname}**: Omitido ({razon})")
                 audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "⚠️ Omitido", 
                                    "Detalles": razon, "Proc": 0, "Rec": 0})
             else:
-                # 4. Ejecutar API
-                logs_expander.write(f"🔄 **{fname}**: Subiendo a {sys_name} ({lineas} líneas)...")
+                # Ejecutar API
+                logs_expander.markdown(f"🔄 **{fname}** ({lineas} líneas) -> {sys_name}...")
                 
-                # Llamada a la lógica
+                # Llamada a lógica
                 res = logic.api_upload_flow(content, fname, sub_id, flow_key, lineas)
                 
-                # Icono según resultado
+                # --- VISUALIZACIÓN TIPO CONSOLA ---
+                # Unimos todos los logs con saltos de línea
+                log_text = "\n".join(res['logs'])
+                logs_expander.code(log_text, language="text") # Muestra el bloque gris tipo terminal
+                
+                # Resultado final en negrita
                 icon = "✅" if "Exitoso" in res['status'] else "⚠️"
-                logs_expander.write(f"{icon} **{fname}**: {res['status']} (Rec: {res['rec']})")
+                logs_expander.markdown(f"**Resultado:** {icon} {res['status']} (Rec: {res['rec']})")
+                logs_expander.divider() # Línea separadora
                 
                 audit_rows.append({
                     "Archivo": fname, "Sistema": sys_name, "Estado": res['status'],
                     "Detalles": res['details'], "Proc": res['proc'], "Rec": res['rec']
                 })
         
-        # Actualizar barra usando el índice del bucle
         progress_bar.progress((i + 1) / total_files)
 
     logs_expander.update(label="✅ Proceso Finalizado", state="complete", expanded=False)
