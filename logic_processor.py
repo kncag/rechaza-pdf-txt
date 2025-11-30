@@ -116,10 +116,21 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
     
     try:
-        # 1. Subir
-        requests.post(eps["subir"], files={"edt": (filename, file_bytes)}, data={"subscription_public_id": sub_id}).raise_for_status()
-        # 2. Procesar
+        # 1. SUBIR
+        # Asegurarnos de que file_bytes sea bytes puros, no un objeto puntero
+        if hasattr(file_bytes, 'getvalue'):
+            payload_content = file_bytes.getvalue()
+        else:
+            payload_content = file_bytes
+
+        files = {"edt": (filename, payload_content)}
+        data = {"subscription_public_id": sub_id}
+        
+        requests.post(eps["subir"], files=files, data=data).raise_for_status()
+        
+        # 2. PROCESAR
         requests.post(eps["procesar"]).raise_for_status()
+        
     except Exception as e:
         return {"status": "❌ Error API", "details": str(e), "proc": 0, "rec": 0}
 
