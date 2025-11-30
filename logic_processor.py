@@ -62,8 +62,14 @@ def validar_contenido(filename, content_str):
 
 # --- BUCLES API (CON LOGS) ---
 def loop_sincronizar(url, max_attempts=15):
+    """
+    Intenta sincronizar. 
+    MEJORA: Si recibe 0/0, espera y reintenta unas veces más por si es lag del servidor.
+    """
     logs = []
     init_proc, init_fail = 0, 0
+    
+    # Intento inicial
     try:
         r = requests.post(url); r.raise_for_status()
         d = r.json()
@@ -74,19 +80,36 @@ def loop_sincronizar(url, max_attempts=15):
         logs.append(f"   ❌ [SINCR #1] Error: {str(e)}")
         return 0, 0, -1, -1, logs
 
-    if init_proc == 0 and init_fail == 0: return 0, 0, 0, 0, logs
-        
+    # CORRECCIÓN CRÍTICA:
+    # Si tenemos datos (1|1, 50|0, etc), retornamos éxito inmediato.
+    if init_proc > 0 or init_fail > 0:
+        return init_proc, init_fail, init_proc, init_fail, logs
+    
+    # Si es 0|0, NO nos rendimos todavía. Podría ser latencia.
+    # Entramos al bucle para dar tiempo al servidor.
+    
     proc, fail = init_proc, init_fail
+    
+    # Probamos hasta max_attempts (ej. 15 veces)
     for i in range(max_attempts):
-        if proc == 0 and fail == 0: break
-        time.sleep(1)
+        # Si de repente aparecen datos, terminamos
+        if proc > 0 or fail > 0: 
+            logs.append(f"   ✅ [SINCR #{i+2}] ¡Datos detectados! Proc: {proc} | Fail: {fail}")
+            # Actualizamos los valores iniciales para que el resto del flujo sepa que hubo datos
+            return proc, fail, proc, fail, logs
+            
+        time.sleep(2) # Esperamos 2 segundos entre intentos (Simulamos latencia humana/red)
+        
         try:
             r = requests.post(url); d = r.json()
             if isinstance(d, list) and d: d = d[0]
             proc, fail = d.get("processed_record", 0), d.get("failed_record", 0)
             logs.append(f"   🔹 [SINCR #{i+2}] Proc: {proc} | Fail: {fail}")
-        except: continue
-    return init_proc, init_fail, proc, fail, logs
+        except: 
+            continue
+            
+    # Si después de todos los intentos sigue 0|0, entonces sí estaba vacío.
+    return 0, 0, 0, 0, logs
 
 def loop_reconciliar(url, target_count, line_count):
     logs = []
