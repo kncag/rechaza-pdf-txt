@@ -38,6 +38,24 @@ RULES_UDEP = [
 ]
 
 # --- HELPERS ---
+def normalizar_a_crlf(content_bytes):
+    """
+    Asegura que el archivo tenga saltos de línea de Windows (\r\n).
+    Esto es CRÍTICO para APIs bancarias antiguas.
+    """
+    try:
+        # 1. Decodificar (asumiendo utf-8 o latin-1)
+        text = content_bytes.decode('utf-8', errors='ignore')
+        
+        # 2. Normalizar saltos: Primero todo a \n, luego todo a \r\n
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text_crlf = text.replace('\n', '\r\n')
+        
+        # 3. Volver a bytes
+        return text_crlf.encode('utf-8')
+    except:
+        # Si falla (es binario puro), devolver original
+        return content_bytes
 def get_reconcile_retries(line_count):
     for max_lines, retries in RECONCILE_RETRY_CONFIG:
         if line_count <= max_lines: return retries
@@ -147,26 +165,25 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
     execution_logs = []
     
-    # Validación de seguridad
-    file_size = len(file_bytes)
+    # 1. NORMALIZACIÓN CRÍTICA
+    file_bytes_clean = normalizar_a_crlf(file_bytes)
+    file_size = len(file_bytes_clean)
+    
     if file_size == 0:
-        execution_logs.append("❌ [ERROR] 0 bytes detectados.")
+        # ... error 0 bytes ...
         return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": execution_logs}
     
-    # 2. SIMULAR ARCHIVO FÍSICO
-    # Envolvemos los bytes para que 'requests' crea que es un archivo abierto (stream)
-    file_stream = BytesIO(file_bytes)
+    # 2. ENVOLVER EN BYTESIO
+    file_stream = BytesIO(file_bytes_clean)
     
-    execution_logs.append(f"📦 Enviando {file_size} bytes (Stream Mode)...")
+    execution_logs.append(f"📦 Enviando {file_size} bytes (Norm. CRLF)...")
 
     try:
-        # 1. SUBIR
-        # Usamos el stream en lugar de los bytes directos
+        # SUBIR (Igual que antes, pero usando el stream normalizado)
         files = {"edt": (filename, file_stream)}
         data = {"subscription_public_id": sub_id}
         
         requests.post(eps["subir"], files=files, data=data).raise_for_status()
-        execution_logs.append(f"✅ [SUBIR] OK ({filename} -> {sub_id})")
         
         # 2. PROCESAR
         requests.post(eps["procesar"]).raise_for_status()
