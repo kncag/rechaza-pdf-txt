@@ -121,14 +121,26 @@ def loop_reconciliar(url, target_count, line_count):
 # --- FLUJO PRINCIPAL ---
 def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
-    execution_logs = [] 
+    execution_logs = []
     
+    # VALIDACIÓN DE SEGURIDAD: Verificar tamaño
+    file_size = len(file_bytes)
+    if file_size == 0:
+        execution_logs.append("❌ [ERROR INTERNO] El archivo llegó vacío (0 bytes) a la función de subida.")
+        return {"status": "❌ Error Bytes", "details": "0 bytes detectados", "proc": 0, "rec": 0, "logs": execution_logs}
+    
+    execution_logs.append(f"📦 Preparando subida: {file_size} bytes detectados.")
+
     try:
-        # 1. Subir
-        # Importante: file_bytes ya son bytes puros aquí
-        requests.post(eps["subir"], files={"edt": (filename, file_bytes)}, data={"subscription_public_id": sub_id}).raise_for_status()
+        # 1. SUBIR
+        # CORRECCIÓN CLAVE: Agregamos 'text/plain' explícitamente
+        files = {"edt": (filename, file_bytes, 'text/plain')}
+        data = {"subscription_public_id": sub_id}
+        
+        requests.post(eps["subir"], files=files, data=data).raise_for_status()
         execution_logs.append(f"✅ [SUBIR] OK ({filename} -> {sub_id})")
-        # 2. Procesar
+        
+        # 2. PROCESAR
         requests.post(eps["procesar"]).raise_for_status()
         execution_logs.append("✅ [PROCESAR] OK")
     except Exception as e:
