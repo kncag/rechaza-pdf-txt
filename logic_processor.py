@@ -2,12 +2,11 @@ import time
 import requests
 from io import BytesIO
 
-# --- CONFIGURACIÓN DE REINTENTOS ---
+# --- CONFIGURACIÓN Y REGLAS (IGUAL QUE SIEMPRE) ---
 RECONCILE_RETRY_CONFIG = [
     (20,  3), (40,  4), (50,  5), (60,  8), (float("inf"), 10),
 ]
 
-# --- ENDPOINTS ---
 ENDPOINTS = {
     "udep": {
         "subir": "https://rx06her9g5.execute-api.us-east-1.amazonaws.com/UDEP/subir",
@@ -23,7 +22,6 @@ ENDPOINTS = {
     }
 }
 
-# --- REGLAS ---
 RULES_EURO = [
     ("sub_YK5GU0000019", ["bws", "sbp"], []),
     ("sub_YK5GU0000020", ["cdpg"], ["dolares"]),
@@ -38,24 +36,6 @@ RULES_UDEP = [
 ]
 
 # --- HELPERS ---
-def normalizar_a_crlf(content_bytes):
-    """
-    Asegura que el archivo tenga saltos de línea de Windows (\r\n).
-    Esto es CRÍTICO para APIs bancarias antiguas.
-    """
-    try:
-        # 1. Decodificar (asumiendo utf-8 o latin-1)
-        text = content_bytes.decode('utf-8', errors='ignore')
-        
-        # 2. Normalizar saltos: Primero todo a \n, luego todo a \r\n
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
-        text_crlf = text.replace('\n', '\r\n')
-        
-        # 3. Volver a bytes
-        return text_crlf.encode('utf-8')
-    except:
-        # Si falla (es binario puro), devolver original
-        return content_bytes
 def get_reconcile_retries(line_count):
     for max_lines, retries in RECONCILE_RETRY_CONFIG:
         if line_count <= max_lines: return retries
@@ -78,16 +58,10 @@ def validar_contenido(filename, content_str):
         return False, "210309 Vacío", count
     return True, "OK", count
 
-# --- BUCLES API (CON LOGS) ---
+# --- BUCLES API ---
 def loop_sincronizar(url, max_attempts=15):
-    """
-    Intenta sincronizar. 
-    MEJORA: Si recibe 0/0, espera y reintenta unas veces más por si es lag del servidor.
-    """
     logs = []
     init_proc, init_fail = 0, 0
-    
-    # Intento inicial
     try:
         r = requests.post(url); r.raise_for_status()
         d = r.json()
@@ -98,36 +72,25 @@ def loop_sincronizar(url, max_attempts=15):
         logs.append(f"   ❌ [SINCR #1] Error: {str(e)}")
         return 0, 0, -1, -1, logs
 
-    # CORRECCIÓN CRÍTICA:
-    # Si tenemos datos (1|1, 50|0, etc), retornamos éxito inmediato.
+    # Si hay datos, éxito inmediato
     if init_proc > 0 or init_fail > 0:
         return init_proc, init_fail, init_proc, init_fail, logs
-    
-    # Si es 0|0, NO nos rendimos todavía. Podría ser latencia.
-    # Entramos al bucle para dar tiempo al servidor.
-    
+        
+    # Si es 0|0, intentamos varias veces por latencia
     proc, fail = init_proc, init_fail
-    
-    # Probamos hasta max_attempts (ej. 15 veces)
     for i in range(max_attempts):
-        # Si de repente aparecen datos, terminamos
         if proc > 0 or fail > 0: 
-            logs.append(f"   ✅ [SINCR #{i+2}] ¡Datos detectados! Proc: {proc} | Fail: {fail}")
-            # Actualizamos los valores iniciales para que el resto del flujo sepa que hubo datos
+            logs.append(f"   ✅ [SINCR #{i+2}] Datos detectados: {proc}/{fail}")
             return proc, fail, proc, fail, logs
             
-        time.sleep(2) # Esperamos 2 segundos entre intentos (Simulamos latencia humana/red)
-        
+        time.sleep(2) # Espera de latencia
         try:
             r = requests.post(url); d = r.json()
             if isinstance(d, list) and d: d = d[0]
             proc, fail = d.get("processed_record", 0), d.get("failed_record", 0)
             logs.append(f"   🔹 [SINCR #{i+2}] Proc: {proc} | Fail: {fail}")
-        except: 
-            continue
-            
-    # Si después de todos los intentos sigue 0|0, entonces sí estaba vacío.
-    return 0, 0, 0, 0, logs
+        except: continue
+    return init_proc, init_fail, proc, fail, logs
 
 def loop_reconciliar(url, target_count, line_count):
     logs = []
@@ -141,7 +104,7 @@ def loop_reconciliar(url, target_count, line_count):
             except: d = []
             ids = d if isinstance(d, list) else d.get("data", d.get("steps", []))
             last_count = len(ids)
-            logs.append(f"   🔸 [RECONC #{i+1}/{max_runs}] IDs: {last_count} (Target: {target_count})")
+            logs.append(f"   🔸 [RECONC #{i+1}] IDs: {last_count} (Target: {target_count})")
             
             if last_count == target_count and target_count > 0: 
                 logs.append("   ✅ Target alcanzado.")
@@ -165,40 +128,47 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
     execution_logs = []
     
-    # 1. NORMALIZACIÓN CRÍTICA
-    file_bytes_clean = normalizar_a_crlf(file_bytes)
-    file_size = len(file_bytes_clean)
-    
+    # 1. PREPARACIÓN (RAW BYTES - SIN MODIFICAR)
+    file_size = len(file_bytes)
     if file_size == 0:
-        # ... error 0 bytes ...
+        execution_logs.append("❌ [ERROR] 0 bytes.")
         return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": execution_logs}
     
-    # 2. ENVOLVER EN BYTESIO
-    file_stream = BytesIO(file_bytes_clean)
-    
-    execution_logs.append(f"📦 Enviando {file_size} bytes (Norm. CRLF)...")
+    # Usamos BytesIO para simular archivo
+    file_stream = BytesIO(file_bytes)
+    execution_logs.append(f"📦 Enviando {file_size} bytes (RAW MODE)...")
 
     try:
-        # SUBIR (Igual que antes, pero usando el stream normalizado)
+        # 1. SUBIR
         files = {"edt": (filename, file_stream)}
         data = {"subscription_public_id": sub_id}
         
-        requests.post(eps["subir"], files=files, data=data).raise_for_status()
+        r1 = requests.post(eps["subir"], files=files, data=data)
+        r1.raise_for_status()
+        
+        # DEBUG: Ver qué respondió el servidor realmente
+        try: resp_subir = r1.json()
+        except: resp_subir = "No JSON"
+        execution_logs.append(f"✅ [SUBIR] OK. Resp: {resp_subir}")
         
         # 2. PROCESAR
-        requests.post(eps["procesar"]).raise_for_status()
-        execution_logs.append("✅ [PROCESAR] OK")
+        r2 = requests.post(eps["procesar"])
+        r2.raise_for_status()
+        
+        # DEBUG: Ver respuesta de procesar
+        try: resp_proc = r2.json()
+        except: resp_proc = "No JSON"
+        execution_logs.append(f"✅ [PROCESAR] OK. Resp: {resp_proc}")
+        
     except Exception as e:
         execution_logs.append(f"❌ ERROR API: {str(e)}")
         return {"status": "❌ Error API", "details": str(e), "proc": 0, "rec": 0, "logs": execution_logs}
 
-    # ... (EL RESTO DEL CÓDIGO PERMANECE EXACTAMENTE IGUAL: Sincronizar y Reconciliar) ...
     # 3. Sincronizar
     ip, ifail, _, _, sync_logs = loop_sincronizar(eps["sincronizar"])
     execution_logs.extend(sync_logs)
     
     # 4. Reconciliar
-    # ... (copia el resto de tu función anterior aquí) ...
     recon_total, status = 0, ""
     recon_logs = []
     
