@@ -1,7 +1,16 @@
-# logic_processor.py
+import time
 import requests
 
-# --- Configuración de Endpoints ---
+# --- CONFIGURACIÓN DE REINTENTOS (Original Local) ---
+# (Num Líneas, Max Reintentos)
+RECONCILE_RETRY_CONFIG = [
+    (20,  3),
+    (40,  4),
+    (50,  5),
+    (60,  8),
+    (float("inf"), 10),
+]
+
 ENDPOINTS = {
     "udep": {
         "subir": "https://rx06her9g5.execute-api.us-east-1.amazonaws.com/UDEP/subir",
@@ -17,7 +26,7 @@ ENDPOINTS = {
     }
 }
 
-# --- Reglas de Clasificación ---
+# Reglas de Clasificación
 RULES_EURO = [
     ("sub_YK5GU0000019", ["bws", "sbp"], []),
     ("sub_YK5GU0000020", ["cdpg"], ["dolares"]),
@@ -31,90 +40,165 @@ RULES_UDEP = [
     ("sub_YK5GU0000024", ["2103093"], [])
 ]
 
+# --- UTILIDADES ---
+
+def get_reconcile_retries(line_count):
+    """Calcula intentos según el tamaño del archivo."""
+    for max_lines, retries in RECONCILE_RETRY_CONFIG:
+        if line_count <= max_lines:
+            return retries
+    return 4
+
 def detect_system_and_subscription(filename):
-    """
-    Intenta determinar si el archivo pertenece a EURO o UDEP
-    y cuál es su ID de suscripción basándose en el nombre.
-    Retorna: (nombre_sistema, id_suscripcion, flow_key)
-    """
     fname_lower = filename.lower()
-    
-    # 1. Intentar con reglas EURO
-    for sub_id, include, exclude in RULES_EURO:
-        # Lógica de coincidencia: debe tener algun 'include' y NINGUN 'exclude'
-        # Usamos nombre base simple, asumiendo que el usuario sube el archivo directo
-        if any(inc in fname_lower for inc in include) and not any(exc in fname_lower for exc in exclude):
+    for sub_id, inc, exc in RULES_EURO:
+        if any(i in fname_lower for i in inc) and not any(e in fname_lower for e in exc):
             return "EURO", sub_id, "euro"
-            
-    # 2. Intentar con reglas UDEP
-    for sub_id, include, exclude in RULES_UDEP:
-        if any(inc in fname_lower for inc in include) and not any(exc in fname_lower for exc in exclude):
+    for sub_id, inc, exc in RULES_UDEP:
+        if any(i in fname_lower for i in inc) and not any(e in fname_lower for e in exc):
             return "UDEP", sub_id, "udep"
-            
     return None, None, None
 
-def api_upload_flow(file_bytes, filename, sub_id, flow_type):
-    """Ejecuta la secuencia de carga en la API."""
+def validar_contenido(filename, content_str):
+    """Retorna (es_valido, razon, num_lineas)"""
+    lines = content_str.splitlines()
+    count = len(lines)
+    base = filename.lower()
+    
+    if (base.startswith("sbp") or base.startswith("bws")) and count <= 1:
+        return False, "sbp/bws vacio", count
+    if base.startswith("210309") and count == 0:
+        return False, "210309 vacio", count
+    # Permitimos vacíos genéricos pero los marcamos para alerta
+    return True, "OK", count
+
+# --- LÓGICA DE API CON REINTENTOS ---
+
+def post_sincronizar_safe(url, max_http_retries=3):
+    """Llama a sincronizar manejando errores 504 internamente."""
+    for _ in range(max_http_retries):
+        try:
+            r = requests.post(url)
+            r.raise_for_status()
+            d = r.json()
+            if isinstance(d, list) and d: d = d[0]
+            return d.get("processed_record", 0), d.get("failed_record", 0)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 504:
+                time.sleep(1) # Esperar antes de reintentar HTTP
+                continue
+            raise e
+        except:
+            time.sleep(1)
+            continue
+    raise Exception("Fallo sincronizar tras reintentos HTTP")
+
+def loop_sincronizar(url, max_attempts=15):
+    """Repite la sincronización hasta obtener datos o agotar intentos."""
+    try:
+        init_proc, init_fail = post_sincronizar_safe(url)
+    except:
+        return 0, 0, -1, -1 # Fallo inicial
+
+    if init_proc == 0 and init_fail == 0:
+        return 0, 0, 0, 0 # Nada que procesar
+        
+    proc, fail = init_proc, init_fail
+    for _ in range(max_attempts):
+        if proc == 0 and fail == 0: break # Terminó
+        try:
+            proc, fail = post_sincronizar_safe(url)
+        except:
+            continue
+            
+    return init_proc, init_fail, proc, fail
+
+def loop_reconciliar(url, target_count, line_count):
+    """Reconcilia usando la tabla de configuración dinámica."""
+    max_runs = get_reconcile_retries(line_count)
+    
+    last_count = 0
+    prev_count = -1
+    no_change = 0
+    
+    for _ in range(max_runs):
+        try:
+            r = requests.post(url, json={})
+            try: d = r.json()
+            except: d = []
+            
+            ids = []
+            if isinstance(d, list): ids = d
+            elif isinstance(d, dict):
+                ids = d.get("data", d.get("steps", []))
+            
+            last_count = len(ids)
+            
+            if last_count == target_count and target_count > 0: 
+                break # Éxito exacto
+            
+            # Lógica de estabilidad: si el número no cambia 3 veces, salimos
+            if last_count == prev_count:
+                no_change += 1
+                if no_change >= 3: break
+            else:
+                no_change = 0
+            prev_count = last_count
+            time.sleep(1)
+        except:
+            continue
+            
+    return last_count
+
+def api_upload_flow(file_bytes, filename, sub_id, flow_type, line_count):
     eps = ENDPOINTS[flow_type]
-    results = {}
     
     # 1. SUBIR
     try:
         files = {"edt": (filename, file_bytes)}
         data = {"subscription_public_id": sub_id}
-        r = requests.post(eps["subir"], files=files, data=data)
-        r.raise_for_status()
+        requests.post(eps["subir"], files=files, data=data).raise_for_status()
     except Exception as e:
-        return {"status": "Error Subida", "details": str(e), "processed": 0, "reconciled": 0}
+        return {"status": "❌ Error Subida", "details": str(e), "proc": 0, "rec": 0}
 
     # 2. PROCESAR
     try:
         requests.post(eps["procesar"]).raise_for_status()
     except Exception as e:
-        return {"status": "Error Procesar", "details": str(e), "processed": 0, "reconciled": 0}
-        
-    # 3. SINCRONIZAR
-    try:
-        r = requests.post(eps["sincronizar"])
-        sync_data = r.json()
-        if isinstance(sync_data, list) and sync_data: sync_data = sync_data[0]
-        elif not isinstance(sync_data, dict): sync_data = {}
-        
-        proc = sync_data.get("processed_record", 0)
-        fail = sync_data.get("failed_record", 0)
-    except Exception as e:
-        return {"status": "Error Sincronizar", "details": str(e), "processed": 0, "reconciled": 0}
+        return {"status": "❌ Error Procesar", "details": str(e), "proc": 0, "rec": 0}
 
-    # 4. RECONCILIAR
-    try:
-        r = requests.post(eps["reconciliar"], json={})
-        # Manejo robusto de respuesta
-        try:
-            recon_data = r.json()
-        except:
-            recon_data = []
-            
-        ids = []
-        if isinstance(recon_data, list): ids = recon_data
-        elif isinstance(recon_data, dict):
-            if "data" in recon_data: ids = recon_data["data"]
-            elif "steps" in recon_data: ids = recon_data["steps"]
-        
-        recon_count = len(ids)
-    except Exception as e:
-        return {"status": "Error Reconciliar", "details": str(e), "processed": proc, "reconciled": 0}
-
-    # Estado final
-    if fail > 0: 
-        status = "⚠️ Procesado con Fallos"
-    elif proc == 0 and fail == 0: 
-        status = "ℹ️ Sin Datos Nuevos"
-    else: 
-        status = "✅ Procesado Exitosamente"
+    # 3. SINCRONIZAR (Con Loop original)
+    ip, ifail, lp, lfail = loop_sincronizar(eps["sincronizar"])
     
+    # 4. RECONCILIAR (Lógica original)
+    recon_total = 0
+    status = ""
+    
+    if ip == 0 and ifail == 0:
+        # Caso 1: Sin datos
+        try:
+            requests.post(eps["reconciliar"], json={})
+        except: pass
+        status = "ℹ️ Sin Datos (Vacío)"
+    elif ifail == ip:
+        # Caso 2: Ya procesado anteriormente
+        try:
+            requests.post(eps["reconciliar"], json={})
+        except: pass
+        status = "⚠️ Ya Procesado Anteriormente"
+    else:
+        # Caso 3: Nuevo procesamiento
+        target = ifail if (ip > 0 and ifail > 0) else 0
+        recon_total = loop_reconciliar(eps["reconciliar"], target, line_count)
+        
+        if ifail > 0 and ifail != ip: 
+            status = "⚠️ Procesado con Fallos"
+        else: 
+            status = "✅ Procesado Exitosamente"
+
     return {
         "status": status,
-        "processed": proc,
-        "reconciled": recon_count,
-        "details": "Flujo completado OK"
+        "details": f"Sync Init: {ip}/{ifail}",
+        "proc": ip,
+        "rec": recon_total
     }
