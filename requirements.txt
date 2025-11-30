@@ -1,4 +1,6 @@
 streamlit
+imap-tools
+requests
 pandas
 openpyxl
-PyMuPDF
+colorama
