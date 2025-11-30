@@ -22,24 +22,28 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.info("🚗 **ZONA EURO MOTORS** (REC/EURO)")
+    # Guardamos en variable 'files_euro'
     files_euro = st.file_uploader("Archivos EURO", accept_multiple_files=True, type=['txt'], key="euro")
 
 with col2:
     st.success("🎓 **ZONA UDEP** (REC/UDEP)")
+    # Guardamos en variable 'files_udep'
     files_udep = st.file_uploader("Archivos UDEP", accept_multiple_files=True, type=['txt'], key="udep")
 
 # --- BOTÓN DE PROCESO ---
+# Unificamos listas solo para verificar si hay archivos
 all_files = (files_euro or []) + (files_udep or [])
 
 if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_container_width=True):
     
-    # Preparar cola de trabajo
+    # 1. Preparar la cola de trabajo unificada
     queue = []
     if files_euro:
         for f in files_euro: queue.append((f, "EURO", logic.RULES_EURO, "euro"))
     if files_udep:
         for f in files_udep: queue.append((f, "UDEP", logic.RULES_UDEP, "udep"))
         
+    # CORRECCIÓN: Usamos el tamaño de la cola, no 'uploaded_files'
     total_files = len(queue)
     audit_rows = []
     
@@ -48,24 +52,17 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
     status_text = st.empty()
     logs_expander = st.status("📝 Log de ejecución en tiempo real", expanded=True)
     
-    for i, file in enumerate(uploaded_files): # o queue
-        # ...
-        
-        # LEER CONTENIDO CORRECTAMENTE
-        # Esto obtiene los bytes y no afecta el puntero del objeto file original para otras cosas
-        content_bytes = file.getvalue() 
-        
-        # ... validaciones ...
-        
-        # PASAR content_bytes (que son los datos crudos) A LA FUNCIÓN
-        res = logic.api_upload_flow(content_bytes, fname, sub_id, flow_key, lineas)
+    # Iteramos sobre la 'queue' que acabamos de crear
+    for i, (file, sys_name, rules, flow_key) in enumerate(queue):
+        fname = file.name
+        status_text.markdown(f"**Procesando ({i+1}/{total_files}):** `{fname}`")
         
         # Leer contenido
         content = file.getvalue()
         try: content_str = content.decode('utf-8', errors='ignore')
         except: content_str = ""
         
-        # 1. Identificar Suscripción
+        # 2. Identificar Suscripción
         sub_id = logic.find_subscription_id(fname, rules)
         
         if not sub_id:
@@ -73,15 +70,17 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
             audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "🚫 Error Regla", 
                                "Detalles": "Nombre no reconocido", "Proc": 0, "Rec": 0})
         else:
-            # 2. Validar
+            # 3. Validar
             valido, razon, lineas = logic.validar_contenido(fname, content_str)
             if not valido:
                 logs_expander.write(f"⚠️ **{fname}**: Omitido por validación ({razon})")
                 audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "⚠️ Omitido", 
                                    "Detalles": razon, "Proc": 0, "Rec": 0})
             else:
-                # 3. Ejecutar API
+                # 4. Ejecutar API
                 logs_expander.write(f"🔄 **{fname}**: Subiendo a {sys_name} ({lineas} líneas)...")
+                
+                # Llamada a la lógica
                 res = logic.api_upload_flow(content, fname, sub_id, flow_key, lineas)
                 
                 # Icono según resultado
@@ -93,6 +92,7 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
                     "Detalles": res['details'], "Proc": res['proc'], "Rec": res['rec']
                 })
         
+        # Actualizar barra usando el índice del bucle
         progress_bar.progress((i + 1) / total_files)
 
     logs_expander.update(label="✅ Proceso Finalizado", state="complete", expanded=False)
@@ -107,17 +107,20 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
         # 1. Métricas visuales
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Archivos", len(df))
-        m2.metric("Procesados OK", df[df['Estado'].str.contains("Exitoso")].shape[0])
+        # Filtro seguro para contar exitosos
+        ok_count = df[df['Estado'].astype(str).str.contains("Exitoso", na=False)].shape[0]
+        m2.metric("Procesados OK", ok_count)
         m3.metric("Registros (API)", df['Proc'].sum())
         m4.metric("IDs Reconciliados", df['Rec'].sum())
         
         # 2. Tabla con Colores
         def color_row(val):
+            val_str = str(val)
             color = 'black'
-            if 'Exitoso' in val: color = '#28a745' # Verde
-            elif 'Fallos' in val: color = '#ffc107' # Amarillo
-            elif 'Error' in val: color = '#dc3545' # Rojo
-            elif 'Omitido' in val: color = '#6c757d' # Gris
+            if 'Exitoso' in val_str: color = '#28a745' # Verde
+            elif 'Fallos' in val_str: color = '#ffc107' # Amarillo
+            elif 'Error' in val_str: color = '#dc3545' # Rojo
+            elif 'Omitido' in val_str: color = '#6c757d' # Gris
             return f'color: {color}; font-weight: bold'
 
         st.subheader("📊 Reporte Detallado")
