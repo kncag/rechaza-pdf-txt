@@ -3,9 +3,8 @@ import requests
 from io import BytesIO
 
 # --- CONFIGURACIÓN ---
-# Reducimos un poco los intentos para que falle rápido si algo va mal, en lugar de esperar
 RECONCILE_RETRY_CONFIG = [
-    (20,  3), (40,  4), (60,  6), (float("inf"), 8),
+    (20,  3), (40,  4), (50,  5), (60,  8), (float("inf"), 10),
 ]
 
 ENDPOINTS = {
@@ -72,7 +71,41 @@ def extraer_conteo_procesar(json_response):
     except: pass
     return proc_total, fail_total
 
-# --- RECONCILIACIÓN (Este sí necesita loop corto para esperar IDs) ---
+# --- BUCLES ROBUSTOS ---
+
+def loop_sincronizar_robusto(session, url, expected_count):
+    """
+    Intenta sincronizar esperando a que el servidor confirme la cantidad esperada.
+    """
+    logs = []
+    
+    # Damos hasta 10 intentos (aprox 20 segundos)
+    for i in range(10):
+        try:
+            r = session.post(url)
+            d = r.json()
+            if isinstance(d, list) and d: d = d[0]
+            
+            p = d.get("processed_record", 0)
+            f = d.get("failed_record", 0)
+            
+            logs.append(f"   🔹 [SINCR #{i+1}] Proc: {p} | Fail: {f}")
+            
+            # Si la suma de procesados + fallidos es igual o mayor a lo que detectamos
+            # en el paso anterior, significa que terminó.
+            if (p + f) >= expected_count:
+                return p, f, logs
+                
+            # Si no, esperamos un poco más
+            time.sleep(2)
+        except Exception as e:
+            logs.append(f"   ❌ Error Sync: {e}")
+            time.sleep(1)
+            
+    # Si se acaba el tiempo, devolvemos lo que tengamos
+    logs.append("   ⚠️ Timeout en Sincronización (No se confirmaron todos los registros)")
+    return 0, 0, logs
+
 def loop_reconciliar(session, url, target_count, line_count):
     logs = []
     max_runs = get_reconcile_retries(line_count)
@@ -88,14 +121,16 @@ def loop_reconciliar(session, url, target_count, line_count):
             
             logs.append(f"   🔸 [RECONC #{i+1}] IDs: {last_count}")
             
-            if last_count == target_count and target_count > 0: break
+            if last_count == target_count and target_count > 0: 
+                logs.append("   ✅ Target alcanzado.")
+                break
             
             if last_count == prev_count:
                 no_change += 1
-                if no_change >= 2: break # Salir más rápido si no cambia
+                if no_change >= 2: break
             else: no_change = 0
             prev_count = last_count
-            time.sleep(1) # Espera mínima necesaria
+            time.sleep(1)
         except Exception as e:
             logs.append(f"   ❌ Error Reconciliar: {str(e)}")
             continue
@@ -128,7 +163,6 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
         r2 = session.post(eps["procesar"])
         r2.raise_for_status()
         
-        # Leer respuesta inmediatamente
         try: 
             json_proc = r2.json()
             proc_detected, fail_detected = extraer_conteo_procesar(json_proc)
@@ -140,34 +174,38 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
         execution_logs.append(f"❌ ERROR API: {str(e)}")
         return {"status": "❌ Error API", "details": str(e), "proc": 0, "rec": 0, "logs": execution_logs}
 
-    # --- DECISIÓN RÁPIDA ---
+    # --- DECISIÓN ---
     if proc_detected == 0 and fail_detected == 0:
-        execution_logs.append("🛑 Sin datos detectados. Terminando.")
-        try: session.post(eps["reconciliar"], json={}) # Limpieza
+        execution_logs.append("🛑 Sin datos detectados en Parse. Terminando.")
+        try: session.post(eps["reconciliar"], json={}) 
         except: pass
         return {"status": "ℹ️ Sin Datos", "details": "0 registros", "proc": 0, "rec": 0, "logs": execution_logs}
 
-    # 3. SINCRONIZAR (SIN BUCLES - UNA SOLA VEZ)
-    # Como PROCESAR ya nos confirmó los datos, confiamos en la sesión y disparamos una vez.
-    try:
-        session.post(eps["sincronizar"])
-        execution_logs.append("✅ [SINCRONIZAR] Disparado")
-    except Exception as e:
-        execution_logs.append(f"❌ Error Sync: {e}")
+    # 3. SINCRONIZAR (USANDO EL BUCLE ROBUSTO NUEVO)
+    execution_logs.append(f"🔄 [SINCRONIZAR] Esperando confirmación de {proc_detected} registros...")
+    
+    # Esperamos que la suma de (proc + fail) llegue al menos a lo que detectamos
+    target_sync = proc_detected + fail_detected
+    
+    final_proc, final_fail, sync_logs = loop_sincronizar_robusto(session, eps["sincronizar"], target_sync)
+    execution_logs.extend(sync_logs)
 
     # 4. RECONCILIAR
-    # Usamos los fallos como target si existen
-    target = fail_detected
-    recon_total, recon_logs = loop_reconciliar(session, eps["reconciliar"], target, line_count)
-    execution_logs.extend(recon_logs)
+    # Usamos los fallos detectados como target
+    target_rec = final_fail
     
+    # Logica de estado final
     status = "✅ Exitoso"
-    if fail_detected > 0: status = "⚠️ Con Fallos"
+    if final_fail > 0: status = "⚠️ Con Fallos"
+    if final_proc == 0 and final_fail == 0: status = "⚠️ Error Sincronización"
+
+    recon_total, recon_logs = loop_reconciliar(session, eps["reconciliar"], target_rec, line_count)
+    execution_logs.extend(recon_logs)
 
     return {
         "status": status, 
-        "details": f"Reg: {proc_detected}/{fail_detected}", 
-        "proc": proc_detected, 
+        "details": f"Reg: {final_proc}/{final_fail}", 
+        "proc": final_proc, 
         "rec": recon_total, 
         "logs": execution_logs
     }
