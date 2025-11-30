@@ -1,5 +1,6 @@
 import time
 import requests
+from io import BytesIO
 
 # --- CONFIGURACIÓN DE REINTENTOS ---
 RECONCILE_RETRY_CONFIG = [
@@ -129,14 +130,16 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
         execution_logs.append("❌ [ERROR] 0 bytes detectados.")
         return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": execution_logs}
     
-    execution_logs.append(f"📦 Enviando {file_size} bytes (Modo Local)...")
+    # 2. SIMULAR ARCHIVO FÍSICO
+    # Envolvemos los bytes para que 'requests' crea que es un archivo abierto (stream)
+    file_stream = BytesIO(file_bytes)
+    
+    execution_logs.append(f"📦 Enviando {file_size} bytes (Stream Mode)...")
 
     try:
         # 1. SUBIR
-        # --- CORRECCIÓN AQUÍ ---
-        # Quitamos 'text/plain'. Enviamos la tupla de 2 elementos igual que en local: (nombre, contenido)
-        files = {"edt": (filename, file_bytes)}
-        
+        # Usamos el stream en lugar de los bytes directos
+        files = {"edt": (filename, file_stream)}
         data = {"subscription_public_id": sub_id}
         
         requests.post(eps["subir"], files=files, data=data).raise_for_status()
@@ -149,15 +152,16 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
         execution_logs.append(f"❌ ERROR API: {str(e)}")
         return {"status": "❌ Error API", "details": str(e), "proc": 0, "rec": 0, "logs": execution_logs}
 
+    # ... (EL RESTO DEL CÓDIGO PERMANECE EXACTAMENTE IGUAL: Sincronizar y Reconciliar) ...
     # 3. Sincronizar
     ip, ifail, _, _, sync_logs = loop_sincronizar(eps["sincronizar"])
     execution_logs.extend(sync_logs)
     
     # 4. Reconciliar
+    # ... (copia el resto de tu función anterior aquí) ...
     recon_total, status = 0, ""
     recon_logs = []
     
-    # Lógica idéntica a local
     if ip == 0 and ifail == 0:
         try: requests.post(eps["reconciliar"], json={})
         except: pass
