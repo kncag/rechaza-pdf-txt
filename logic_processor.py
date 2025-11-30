@@ -1,14 +1,7 @@
 # logic_processor.py
-import os
-import re
-import tempfile
 import requests
-import pandas as pd
-from datetime import datetime, timedelta, time, date
-from pathlib import Path
-from imap_tools import MailBox, AND
 
-# --- Configuración ---
+# --- Configuración de Endpoints ---
 ENDPOINTS = {
     "udep": {
         "subir": "https://rx06her9g5.execute-api.us-east-1.amazonaws.com/UDEP/subir",
@@ -24,7 +17,7 @@ ENDPOINTS = {
     }
 }
 
-# Reglas de clasificación (Simplificadas para el ejemplo)
+# --- Reglas de Clasificación ---
 RULES_EURO = [
     ("sub_YK5GU0000019", ["bws", "sbp"], []),
     ("sub_YK5GU0000020", ["cdpg"], ["dolares"]),
@@ -38,110 +31,90 @@ RULES_UDEP = [
     ("sub_YK5GU0000024", ["2103093"], [])
 ]
 
-def conectar_imap(user, password):
-    """Prueba la conexión al correo."""
-    try:
-        mailbox = MailBox('outlook.office365.com').login(user, password)
-        return mailbox
-    except Exception as e:
-        raise Exception(f"Error de autenticación IMAP: {e}")
-
-def descargar_adjuntos(mailbox, fecha_objetivo, carpetas_filtro):
+def detect_system_and_subscription(filename):
     """
-    Descarga adjuntos usando la lógica de ventana 19:00 - 19:00.
-    Retorna una lista de diccionarios: {'filename', 'content', 'folder', 'date'}
+    Intenta determinar si el archivo pertenece a EURO o UDEP
+    y cuál es su ID de suscripción basándose en el nombre.
+    Retorna: (nombre_sistema, id_suscripcion, flow_key)
     """
-    adjuntos_encontrados = []
+    fname_lower = filename.lower()
     
-    # Definir ventana de tiempo
-    fin = datetime.combine(fecha_objetivo, time(19, 0))
-    inicio = fin - timedelta(days=1)
-    
-    # Buscar correos en el rango de fechas (IMAP busca por día completo, filtramos después)
-    criteria = AND(date_gte=inicio.date(), date_lt=fecha_objetivo + timedelta(days=1))
-    
-    for msg in mailbox.fetch(criteria):
-        # Filtro de hora preciso en Python
-        # msg.date suele tener timezone, lo normalizamos
-        msg_date = msg.date.replace(tzinfo=None)
-        
-        if not (inicio <= msg_date <= fin):
-            continue
-
-        # Filtro de carpeta (aproximado, ya que IMAP 'INBOX' es global, 
-        # a menos que busquemos en carpetas especificas. Aquí asumimos INBOX y filtramos por subject/remitente si fuera necesario
-        # Ojo: mailbox.folder.set() se usa para cambiar carpetas en IMAP.
-        # Para simplificar, asumimos que están en INBOX o iteramos carpetas afuera.
-        pass 
-
-        for att in msg.attachments:
-            if att.filename.lower().endswith(".txt") and "crep" not in att.filename.lower():
-                adjuntos_encontrados.append({
-                    "filename": att.filename,
-                    "content": att.payload, # Bytes del archivo
-                    "email_date": msg_date
-                })
-                
-    return adjuntos_encontrados
-
-def match_subscription(fname, rules):
-    name = Path(fname).stem.lower()
-    for sub_id, include, exclude in rules:
-        if any(inc.lower() in name for inc in include) and not any(exc.lower() in name for exc in exclude):
-            return sub_id
-    return None
+    # 1. Intentar con reglas EURO
+    for sub_id, include, exclude in RULES_EURO:
+        # Lógica de coincidencia: debe tener algun 'include' y NINGUN 'exclude'
+        # Usamos nombre base simple, asumiendo que el usuario sube el archivo directo
+        if any(inc in fname_lower for inc in include) and not any(exc in fname_lower for exc in exclude):
+            return "EURO", sub_id, "euro"
+            
+    # 2. Intentar con reglas UDEP
+    for sub_id, include, exclude in RULES_UDEP:
+        if any(inc in fname_lower for inc in include) and not any(exc in fname_lower for exc in exclude):
+            return "UDEP", sub_id, "udep"
+            
+    return None, None, None
 
 def api_upload_flow(file_bytes, filename, sub_id, flow_type):
-    """Ejecuta el flujo de subida a la API (Subir -> Procesar -> Sincronizar -> Reconciliar)."""
+    """Ejecuta la secuencia de carga en la API."""
     eps = ENDPOINTS[flow_type]
+    results = {}
     
     # 1. SUBIR
-    files = {"edt": (filename, file_bytes)}
-    data = {"subscription_public_id": sub_id}
     try:
+        files = {"edt": (filename, file_bytes)}
+        data = {"subscription_public_id": sub_id}
         r = requests.post(eps["subir"], files=files, data=data)
         r.raise_for_status()
     except Exception as e:
-        return {"status": "Error Subida", "details": str(e)}
+        return {"status": "Error Subida", "details": str(e), "processed": 0, "reconciled": 0}
 
     # 2. PROCESAR
     try:
         requests.post(eps["procesar"]).raise_for_status()
     except Exception as e:
-        return {"status": "Error Procesar", "details": str(e)}
+        return {"status": "Error Procesar", "details": str(e), "processed": 0, "reconciled": 0}
         
-    # 3. SINCRONIZAR (Simplificado sin el loop complejo para el ejemplo, pero funcional)
+    # 3. SINCRONIZAR
     try:
         r = requests.post(eps["sincronizar"])
         sync_data = r.json()
-        # Normalizar respuesta
         if isinstance(sync_data, list) and sync_data: sync_data = sync_data[0]
+        elif not isinstance(sync_data, dict): sync_data = {}
+        
         proc = sync_data.get("processed_record", 0)
         fail = sync_data.get("failed_record", 0)
     except Exception as e:
-        return {"status": "Error Sincronizar", "details": str(e)}
+        return {"status": "Error Sincronizar", "details": str(e), "processed": 0, "reconciled": 0}
 
     # 4. RECONCILIAR
     try:
         r = requests.post(eps["reconciliar"], json={})
-        recon_data = r.json()
-        # Lógica básica de extracción de IDs
+        # Manejo robusto de respuesta
+        try:
+            recon_data = r.json()
+        except:
+            recon_data = []
+            
         ids = []
         if isinstance(recon_data, list): ids = recon_data
-        elif isinstance(recon_data, dict) and "data" in recon_data: ids = recon_data["data"]
+        elif isinstance(recon_data, dict):
+            if "data" in recon_data: ids = recon_data["data"]
+            elif "steps" in recon_data: ids = recon_data["steps"]
+        
         recon_count = len(ids)
     except Exception as e:
-        return {"status": "Error Reconciliar", "details": str(e)}
+        return {"status": "Error Reconciliar", "details": str(e), "processed": proc, "reconciled": 0}
 
-    # Determinar estado final
-    status = "Procesado Exitosamente"
-    if fail > 0: status = "Procesado con Fallos"
-    if proc == 0 and fail == 0: status = "Sin Datos Nuevos"
+    # Estado final
+    if fail > 0: 
+        status = "⚠️ Procesado con Fallos"
+    elif proc == 0 and fail == 0: 
+        status = "ℹ️ Sin Datos Nuevos"
+    else: 
+        status = "✅ Procesado Exitosamente"
     
     return {
         "status": status,
         "processed": proc,
-        "failed": fail,
         "reconciled": recon_count,
-        "details": "OK"
+        "details": "Flujo completado OK"
     }
