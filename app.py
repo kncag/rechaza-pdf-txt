@@ -55,31 +55,39 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
     # Iteramos sobre la 'queue' que acabamos de crear
     for i, (file, sys_name, rules, flow_key) in enumerate(queue):
         fname = file.name
-        status_text.markdown(f"**Procesando ({i+1}/{total_files}):** `{fname}`")
         
-        content = file.getvalue()
-        try: content_str = content.decode('utf-8', errors='ignore')
+        # --- PASO CRÍTICO: REBOBINAR Y LEER ---
+        file.seek(0) # 1. Rebobinamos al inicio por si acaso
+        content_bytes = file.read() # 2. Leemos los bytes frescos
+        
+        # Verificación de seguridad (Debug)
+        file_size = len(content_bytes)
+        
+        # Decodificar para validaciones de texto (sin afectar los bytes originales)
+        try: content_str = content_bytes.decode('utf-8', errors='ignore')
         except: content_str = ""
         
-        # --- LOGICA ---
+        status_text.markdown(f"**Procesando ({i+1}/{total_files}):** `{fname}` ({file_size} bytes)")
+        
+        # --- LÓGICA ---
         sub_id = logic.find_subscription_id(fname, rules)
         
         if not sub_id:
+            # ... (código de error por no match) ...
             logs_expander.markdown(f"❌ **{fname}**: Ignorado (No match en {sys_name})")
-            audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "🚫 Error Regla", 
-                               "Detalles": "Nombre no reconocido", "Proc": 0, "Rec": 0})
+            # ...
         else:
             valido, razon, lineas = logic.validar_contenido(fname, content_str)
             if not valido:
+                # ... (código de omitido) ...
                 logs_expander.markdown(f"⚠️ **{fname}**: Omitido ({razon})")
-                audit_rows.append({"Archivo": fname, "Sistema": sys_name, "Estado": "⚠️ Omitido", 
-                                   "Detalles": razon, "Proc": 0, "Rec": 0})
+                # ...
             else:
-                # Ejecutar API
-                logs_expander.markdown(f"🔄 **{fname}** ({lineas} líneas) -> {sys_name}...")
+                # Ejecutar API pasando los bytes frescos
+                logs_expander.markdown(f"🔄 **{fname}** ({lineas} líneas / {file_size} bytes) -> {sys_name}...")
                 
-                # Llamada a lógica
-                res = logic.api_upload_flow(content, fname, sub_id, flow_key, lineas)
+                # AQUÍ PASAMOS content_bytes QUE LEIMOS ARRIBA
+                res = logic.api_upload_flow(content_bytes, fname, sub_id, flow_key, lineas)
                 
                 # --- VISUALIZACIÓN TIPO CONSOLA ---
                 # Unimos todos los logs con saltos de línea
