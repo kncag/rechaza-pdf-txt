@@ -61,24 +61,42 @@ if st.button("🚀 INICIAR PROCESO", type="primary"):
             # para seleccionar carpeta: mailbox.folder.set('NombreCarpeta')
             
             # SIMULACIÓN DE FLUJO DE CARPETAS
-            folders_to_check = {
-                "EURO": {"imap_folder": "Inbox", "flow": "euro", "rules": logic.RULES_EURO},
-                "UDEP": {"imap_folder": "Inbox", "flow": "udep", "rules": logic.RULES_UDEP}
-            }
+    # --- CONFIGURACIÓN ACTUALIZADA DE CARPETAS ---
+            # Nota: Si falla con "Bandeja de entrada", intenta cambiarlo por "INBOX"
+            # Ejemplo: "INBOX/REC/EURO"
             
-            # ADVERTENCIA: Este ejemplo busca en Inbox. Si tus carpetas son subcarpetas,
-            # debes ajustar 'imap_folder' al nombre real en el servidor.
+            folders_to_check = {
+                "EURO": {
+                    "imap_folder": "Bandeja de entrada/REC/EURO", 
+                    "flow": "euro", 
+                    "rules": logic.RULES_EURO
+                },
+                "UDEP": {
+                    "imap_folder": "Bandeja de entrada/REC/UDEP", 
+                    "flow": "udep", 
+                    "rules": logic.RULES_UDEP
+                }
+            }
             
             processed_count = 0
             
             for system_name, cfg in folders_to_check.items():
-                status.write(f"📂 Revisando sistema: **{system_name}**...")
+                status.write(f"📂 Entrando a carpeta: **{cfg['imap_folder']}**...")
                 
-                # Seleccionar carpeta en servidor (intenta Inbox si falla la específica)
                 try:
+                    # Intentamos seleccionar la carpeta específica
                     mailbox.folder.set(cfg['imap_folder'])
-                except:
-                    mailbox.folder.set('INBOX') 
+                except Exception as e:
+                    # Si falla, mostramos el error y probamos con la ruta en inglés por si acaso
+                    status.warning(f"No se encontró '{cfg['imap_folder']}'. Intentando ruta alternativa...")
+                    try:
+                        # Intento alternativo (común en servidores Exchange)
+                        alt_folder = cfg['imap_folder'].replace("Bandeja de entrada", "INBOX")
+                        mailbox.folder.set(alt_folder)
+                        status.info(f"Conectado a '{alt_folder}'")
+                    except:
+                        status.error(f"❌ No se pudo encontrar la carpeta: {cfg['imap_folder']}")
+                        continue # Saltamos al siguiente sistema
 
                 # Descargar
                 atts = logic.descargar_adjuntos(mailbox, target_date, [])
