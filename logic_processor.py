@@ -123,18 +123,20 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
     execution_logs = []
     
-    # VALIDACIÓN DE SEGURIDAD: Verificar tamaño
+    # Validación de seguridad
     file_size = len(file_bytes)
     if file_size == 0:
-        execution_logs.append("❌ [ERROR INTERNO] El archivo llegó vacío (0 bytes) a la función de subida.")
-        return {"status": "❌ Error Bytes", "details": "0 bytes detectados", "proc": 0, "rec": 0, "logs": execution_logs}
+        execution_logs.append("❌ [ERROR] 0 bytes detectados.")
+        return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": execution_logs}
     
-    execution_logs.append(f"📦 Preparando subida: {file_size} bytes detectados.")
+    execution_logs.append(f"📦 Enviando {file_size} bytes (Modo Local)...")
 
     try:
         # 1. SUBIR
-        # CORRECCIÓN CLAVE: Agregamos 'text/plain' explícitamente
-        files = {"edt": (filename, file_bytes, 'text/plain')}
+        # --- CORRECCIÓN AQUÍ ---
+        # Quitamos 'text/plain'. Enviamos la tupla de 2 elementos igual que en local: (nombre, contenido)
+        files = {"edt": (filename, file_bytes)}
+        
         data = {"subscription_public_id": sub_id}
         
         requests.post(eps["subir"], files=files, data=data).raise_for_status()
@@ -155,6 +157,7 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     recon_total, status = 0, ""
     recon_logs = []
     
+    # Lógica idéntica a local
     if ip == 0 and ifail == 0:
         try: requests.post(eps["reconciliar"], json={})
         except: pass
