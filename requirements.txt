@@ -1,6 +1,4 @@
 streamlit
-imap-tools
 requests
 pandas
 openpyxl
-colorama
