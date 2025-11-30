@@ -2,7 +2,7 @@ import time
 import requests
 from io import BytesIO
 
-# --- CONFIGURACIÓN Y REGLAS (IGUAL QUE SIEMPRE) ---
+# --- CONFIGURACIÓN Y REGLAS (IGUALES) ---
 RECONCILE_RETRY_CONFIG = [
     (20,  3), (40,  4), (50,  5), (60,  8), (float("inf"), 10),
 ]
@@ -58,12 +58,15 @@ def validar_contenido(filename, content_str):
         return False, "210309 Vacío", count
     return True, "OK", count
 
-# --- BUCLES API ---
-def loop_sincronizar(url, max_attempts=15):
+# --- BUCLES API (AHORA RECIBEN LA SESIÓN) ---
+
+def loop_sincronizar(session, url, max_attempts=15):
+    """Usa la session para mantener cookies/contexto."""
     logs = []
     init_proc, init_fail = 0, 0
+    
     try:
-        r = requests.post(url); r.raise_for_status()
+        r = session.post(url); r.raise_for_status()
         d = r.json()
         if isinstance(d, list) and d: d = d[0]
         init_proc, init_fail = d.get("processed_record", 0), d.get("failed_record", 0)
@@ -72,34 +75,36 @@ def loop_sincronizar(url, max_attempts=15):
         logs.append(f"   ❌ [SINCR #1] Error: {str(e)}")
         return 0, 0, -1, -1, logs
 
-    # Si hay datos, éxito inmediato
+    # Éxito inmediato
     if init_proc > 0 or init_fail > 0:
         return init_proc, init_fail, init_proc, init_fail, logs
         
-    # Si es 0|0, intentamos varias veces por latencia
+    # Reintentos por latencia
     proc, fail = init_proc, init_fail
     for i in range(max_attempts):
         if proc > 0 or fail > 0: 
             logs.append(f"   ✅ [SINCR #{i+2}] Datos detectados: {proc}/{fail}")
             return proc, fail, proc, fail, logs
             
-        time.sleep(2) # Espera de latencia
+        time.sleep(2)
         try:
-            r = requests.post(url); d = r.json()
+            r = session.post(url); d = r.json()
             if isinstance(d, list) and d: d = d[0]
             proc, fail = d.get("processed_record", 0), d.get("failed_record", 0)
             logs.append(f"   🔹 [SINCR #{i+2}] Proc: {proc} | Fail: {fail}")
         except: continue
+        
     return init_proc, init_fail, proc, fail, logs
 
-def loop_reconciliar(url, target_count, line_count):
+def loop_reconciliar(session, url, target_count, line_count):
+    """Usa la session."""
     logs = []
     max_runs = get_reconcile_retries(line_count)
     last_count, prev_count, no_change = 0, -1, 0
     
     for i in range(max_runs):
         try:
-            r = requests.post(url, json={})
+            r = session.post(url, json={})
             try: d = r.json()
             except: d = []
             ids = d if isinstance(d, list) else d.get("data", d.get("steps", []))
@@ -128,63 +133,72 @@ def api_upload_flow(file_bytes, filename, sub_id, flow_key, line_count):
     eps = ENDPOINTS[flow_key]
     execution_logs = []
     
-    # 1. PREPARACIÓN (RAW BYTES - SIN MODIFICAR)
     file_size = len(file_bytes)
     if file_size == 0:
-        execution_logs.append("❌ [ERROR] 0 bytes.")
-        return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": execution_logs}
+        return {"status": "❌ Error Bytes", "details": "0 bytes", "proc": 0, "rec": 0, "logs": ["❌ 0 bytes detectados"]}
     
-    # Usamos BytesIO para simular archivo
+    # 1. CREAR SESIÓN (Mantiene la memoria entre peticiones)
+    session = requests.Session()
+    
+    # Simular archivo
     file_stream = BytesIO(file_bytes)
-    execution_logs.append(f"📦 Enviando {file_size} bytes (RAW MODE)...")
+    execution_logs.append(f"📦 Enviando {file_size} bytes (Session Mode)...")
 
     try:
         # 1. SUBIR
         files = {"edt": (filename, file_stream)}
         data = {"subscription_public_id": sub_id}
         
-        r1 = requests.post(eps["subir"], files=files, data=data)
+        r1 = session.post(eps["subir"], files=files, data=data)
         r1.raise_for_status()
         
-        # DEBUG: Ver qué respondió el servidor realmente
-        try: resp_subir = r1.json()
-        except: resp_subir = "No JSON"
-        execution_logs.append(f"✅ [SUBIR] OK. Resp: {resp_subir}")
+        try: r_subir_json = r1.json()
+        except: r_subir_json = "OK"
+        execution_logs.append(f"✅ [SUBIR] OK")
         
         # 2. PROCESAR
-        r2 = requests.post(eps["procesar"])
+        r2 = session.post(eps["procesar"])
         r2.raise_for_status()
         
-        # DEBUG: Ver respuesta de procesar
-        try: resp_proc = r2.json()
-        except: resp_proc = "No JSON"
-        execution_logs.append(f"✅ [PROCESAR] OK. Resp: {resp_proc}")
+        try: r_proc_json = r2.json()
+        except: r_proc_json = "OK"
+        # Logueamos lo que nos importaba: processed_record
+        steps = r_proc_json.get('processes', [{}])[0].get('steps', [])
+        proc_record_log = "Unknown"
+        if steps:
+            # Buscamos el paso de Parse Operation (suele ser el index 1 o 2)
+            for s in steps:
+                if 'processed_record' in s:
+                    proc_record_log = s['processed_record']
+                    
+        execution_logs.append(f"✅ [PROCESAR] OK (Detectados en Parse: {proc_record_log})")
         
     except Exception as e:
         execution_logs.append(f"❌ ERROR API: {str(e)}")
         return {"status": "❌ Error API", "details": str(e), "proc": 0, "rec": 0, "logs": execution_logs}
 
-    # 3. Sincronizar
-    ip, ifail, _, _, sync_logs = loop_sincronizar(eps["sincronizar"])
+    # 3. SINCRONIZAR (Pasamos la SESSION)
+    ip, ifail, _, _, sync_logs = loop_sincronizar(session, eps["sincronizar"])
     execution_logs.extend(sync_logs)
     
-    # 4. Reconciliar
+    # 4. RECONCILIAR (Pasamos la SESSION)
     recon_total, status = 0, ""
     recon_logs = []
     
     if ip == 0 and ifail == 0:
-        try: requests.post(eps["reconciliar"], json={})
+        # Intento de reconciliar por si acaso, aunque diga 0
+        try: session.post(eps["reconciliar"], json={})
         except: pass
         status = "ℹ️ Sin Datos"
-        execution_logs.append("ℹ️ [RECONC] Omitido (Sin datos)")
+        execution_logs.append("ℹ️ [RECONC] Omitido (Sin datos en Sync)")
     elif ifail == ip:
-        try: requests.post(eps["reconciliar"], json={})
+        try: session.post(eps["reconciliar"], json={})
         except: pass
         status = "⚠️ Ya Procesado"
         execution_logs.append("⚠️ [RECONC] Omitido (Ya procesado)")
     else:
         target = ifail if (ip > 0 and ifail > 0) else 0
-        recon_total, recon_logs = loop_reconciliar(eps["reconciliar"], target, line_count)
+        recon_total, recon_logs = loop_reconciliar(session, eps["reconciliar"], target, line_count)
         execution_logs.extend(recon_logs)
         status = "⚠️ Con Fallos" if (ifail > 0 and ifail != ip) else "✅ Exitoso"
 
