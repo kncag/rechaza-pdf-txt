@@ -48,9 +48,17 @@ if all_files and st.button("🚀 INICIAR PROCESAMIENTO", type="primary", use_con
     status_text = st.empty()
     logs_expander = st.status("📝 Log de ejecución en tiempo real", expanded=True)
     
-    for i, (file, sys_name, rules, flow_key) in enumerate(queue):
-        fname = file.name
-        status_text.markdown(f"**Procesando ({i+1}/{total_files}):** `{fname}`")
+    for i, file in enumerate(uploaded_files): # o queue
+        # ...
+        
+        # LEER CONTENIDO CORRECTAMENTE
+        # Esto obtiene los bytes y no afecta el puntero del objeto file original para otras cosas
+        content_bytes = file.getvalue() 
+        
+        # ... validaciones ...
+        
+        # PASAR content_bytes (que son los datos crudos) A LA FUNCIÓN
+        res = logic.api_upload_flow(content_bytes, fname, sub_id, flow_key, lineas)
         
         # Leer contenido
         content = file.getvalue()
