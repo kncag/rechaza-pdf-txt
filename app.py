@@ -49,8 +49,8 @@ dict_acc = {(row['PSP'], row['Currency']): row['ACC'] for row in data_PSP}
 # ==========================================
 if "tin_search_results" not in st.session_state:
     st.session_state.tin_search_results = None
-if "parsed_txt_data" not in st.session_state:
-    st.session_state.parsed_txt_data = {}
+if "trama_final_lista" not in st.session_state:
+    st.session_state.trama_final_lista = None
 
 # ==========================================
 # INTERFAZ DE USUARIO (UI)
@@ -65,128 +65,64 @@ tab_consultar, tab_pagar = st.tabs(["🔎 Consultar y Generar Trama", "🚀 Proc
 # PESTAÑA 1: CONSULTAR TINS Y GENERAR TRAMA
 # ==========================================
 with tab_consultar:
-    st.subheader("Generador de Trama y Consulta de Estados")
     
-    input_method_tab1 = st.radio("Selecciona tu fuente de datos:", ["Subir Archivo TXT (Recaudo Banco)", "Ingresar TINs manualmente"], horizontal=True)
-
-    tin_list = []
+    # --- PASO 1: Consulta de API ---
+    st.subheader("Paso 1: Consultar estado de TINs")
+    raw_input = st.text_area(
+        "Pega aquí uno o varios PSP_TIN (separados por comas, espacios o saltos de línea)",
+        placeholder="260167375904, 260178160022\n260178163684",
+        height=100
+    )
     
-    # OPCIÓN A: Archivo TXT
-    if input_method_tab1 == "Subir Archivo TXT (Recaudo Banco)":
-        col_psp, col_cur = st.columns(2)
-        with col_psp:
-            file_psp = st.selectbox("Banco Origen (PSP)", ["BCP", "BBVA", "IBK", "SCOTIA", "KASNET"])
-        with col_cur:
-            file_currency = st.selectbox("Moneda del Archivo", ["PEN", "USD"])
+    if st.button("Consultar Ahora", type="primary"):
+        st.session_state.trama_final_lista = None # Limpiar cualquier trama anterior
+        tin_candidates = re.findall(r'\d+', raw_input)
+        
+        if not tin_candidates:
+            st.warning("No se detectaron TINs válidos en la entrada.")
+            st.session_state.tin_search_results = None
+        else:
+            seen = set()
+            tin_list = [t for t in tin_candidates if not (t in seen or seen.add(t))]
             
-        uploaded_file = st.file_uploader("Sube el archivo .TXT", type=['txt'])
-        
-        if st.button("Procesar TXT y Consultar API", type="primary"):
-            if uploaded_file is not None:
-                st.session_state.parsed_txt_data = {} # Reiniciar memoria
-                seen = set()
-                
-                lines = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-                for line in lines:
-                    if len(line.strip()) >= 149:
-                        try:
-                            # Parsear formato posicional
-                            tin = line[37:49].strip()
-                            date_str = line[82:90]
-                            amount_str = line[96:109]
-                            op_str = line[141:149]
-                            
-                            # Validar que parece un TIN real antes de agregarlo
-                            if not re.match(r'^\d+$', tin):
-                                continue
-                            
-                            # Convertir fecha de YYYYMMDD a formato Serial Excel (Ej. 46134)
-                            dt = datetime.strptime(date_str, "%Y%m%d")
-                            excel_date = str((dt - datetime(1899, 12, 30)).days)
-                            
-                            # Convertir monto
-                            amount = float(amount_str) / 100.0
-                            
-                            # Guardar en memoria de extracción
-                            st.session_state.parsed_txt_data[tin] = {
-                                'VOUCHER_PSP': file_psp,
-                                'VOUCHER_Currency': file_currency,
-                                'VOUCHER_Amount': amount,
-                                'VOUCHER_Operacion_PSP': op_str,
-                                'VOUCHER_FECHA': excel_date
-                            }
-                            
-                            if tin not in seen:
-                                seen.add(tin)
-                                tin_list.append(tin)
-                                
-                        except Exception:
-                            pass # Ignorar líneas que no cumplan
-                            
-                if not tin_list:
-                    st.warning("No se detectaron TINs válidos en el archivo subido.")
-            else:
-                st.warning("Sube un archivo primero.")
-
-    # OPCIÓN B: Manual
-    else:
-        raw_input = st.text_area(
-            "Pega aquí uno o varios PSP_TIN (separados por comas, espacios o saltos de línea)",
-            placeholder="260167375904, 260178160022\n260178163684",
-            height=150
-        )
-        if st.button("Consultar Ahora", type="primary"):
-            tin_candidates = re.findall(r'\d+', raw_input)
-            if not tin_candidates:
-                st.warning("No se detectaron TINs válidos en la entrada.")
-            else:
-                st.session_state.parsed_txt_data = {} # Limpiar memoria TXT
-                seen = set()
-                tin_list = [t for t in tin_candidates if not (t in seen or seen.add(t))]
-
-    # ================= EJECUCIÓN DE LA CONSULTA API =================
-    if tin_list:
-        progress = st.progress(0)
-        total = len(tin_list)
-        resultados_memoria = []
-        
-        with requests.Session() as session:
-            session.auth = (_auth_user, _auth_psw)
-            headers_postman = _headers.copy()
-            headers_postman['User-Agent'] = 'PostmanRuntime/7.26.8'
-            session.headers.update(headers_postman)
+            progress = st.progress(0)
+            total = len(tin_list)
+            resultados_memoria = []
             
-            for idx, tin_clean in enumerate(tin_list):
-                url_postman = f"{_service_url}/consultar/{tin_clean}?search_by=PSP_TIN"
-                try:
-                    r = session.get(url_postman, timeout=15)
-                    if r.status_code == 200:
-                        resultados_memoria.append({"tin": tin_clean, "data": r.json(), "error": None})
-                    else:
-                        resultados_memoria.append({"tin": tin_clean, "data": None, "error": f"Status {r.status_code}", "text": r.text})
-                except Exception as e:
-                    resultados_memoria.append({"tin": tin_clean, "data": None, "error": str(e)})
+            with requests.Session() as session:
+                session.auth = (_auth_user, _auth_psw)
+                headers_postman = _headers.copy()
+                headers_postman['User-Agent'] = 'PostmanRuntime/7.26.8'
+                session.headers.update(headers_postman)
                 
-                progress.progress(int(((idx + 1) / total) * 100))
-        
-        st.session_state.tin_search_results = resultados_memoria
-        st.success("Consulta finalizada.")
+                for idx, tin_clean in enumerate(tin_list):
+                    url_postman = f"{_service_url}/consultar/{tin_clean}?search_by=PSP_TIN"
+                    try:
+                        r = session.get(url_postman, timeout=15)
+                        if r.status_code == 200:
+                            resultados_memoria.append({"tin": tin_clean, "data": r.json(), "error": None})
+                        else:
+                            resultados_memoria.append({"tin": tin_clean, "data": None, "error": f"Status {r.status_code}", "text": r.text})
+                    except Exception as e:
+                        resultados_memoria.append({"tin": tin_clean, "data": None, "error": str(e)})
+                    
+                    progress.progress(int(((idx + 1) / total) * 100))
+            
+            st.session_state.tin_search_results = resultados_memoria
+            st.success("Consulta finalizada.")
 
-    # ================= MOSTRAR RESULTADOS Y TRAMA =================
+    # --- MOSTRAR RESULTADOS Y PASO 2 ---
     if st.session_state.tin_search_results:
         st.markdown("---")
+        st.markdown("### Resultados de la Consulta API:")
         
-        trama_final_lista = []
-        
+        # Mostrar resumen visual de los TINs consultados
         for res in st.session_state.tin_search_results:
             tin_clean = res["tin"]
             data = res["data"]
             
             if data is not None:
                 order_name = data.get("name") or data.get("metadata", {}).get("order_name", "SIN NOMBRE")
-                monto_encontrado = data.get("total", {}).get("value", 0)
-                moneda_encontrada = data.get("total", {}).get("currency", "")
-
                 activity_list = data.get("activity_list") or []
                 activity_desc = "SIN ACTIVITY"
                 activity_status = "SIN ESTADO"
@@ -197,40 +133,95 @@ with tab_consultar:
                         activity_desc = first_act.get("description") or first_act.get("name") or "SIN DESCRIPCIÓN"
                         activity_status = first_act.get("status") or "SIN ESTADO"
 
-                # Mostrar visualmente el estado
                 st.markdown(f"✅ **{tin_clean}** | {order_name} | {activity_desc} | estado: **{activity_status}**")
-                
-                # Armar Trama
-                if tin_clean in st.session_state.parsed_txt_data:
-                    # Extraer del TXT subido
-                    txt_data = st.session_state.parsed_txt_data[tin_clean]
-                    trama_final_lista.append({
-                        'VOUCHER_PSP': txt_data['VOUCHER_PSP'],
-                        'VOUCHER_PSP_TIN': tin_clean,
-                        'VOUCHER_Currency': txt_data['VOUCHER_Currency'],
-                        'VOUCHER_Amount': txt_data['VOUCHER_Amount'],
-                        'VOUCHER_Operacion_PSP': txt_data['VOUCHER_Operacion_PSP'],
-                        'VOUCHER_FECHA': txt_data['VOUCHER_FECHA']
-                    })
-                else:
-                    # Relleno manual si no hay TXT
-                    trama_final_lista.append({
-                        'VOUCHER_PSP': 'COMPLETAR_BANCO',
-                        'VOUCHER_PSP_TIN': tin_clean,
-                        'VOUCHER_Currency': moneda_encontrada,
-                        'VOUCHER_Amount': monto_encontrado,
-                        'VOUCHER_Operacion_PSP': 'COMPLETAR_OPERACION',
-                        'VOUCHER_FECHA': 'COMPLETAR_FECHA'
-                    })
             else:
-                st.error(f"❌ {tin_clean} | Error: {res.get('error')} | {res.get('text', '')}")
+                st.error(f"❌ {tin_clean} | Error al consultar | {res.get('error')}")
 
-        # Mostrar trama consolidada lista para copiar
-        if trama_final_lista:
-            st.markdown("### 📋 Trama generada (Lista para copiar y pagar):")
-            st.info("Copia el siguiente bloque y pégalo en la pestaña 'Procesar Pagos Manuales'")
-            # Mostramos la lista como string de Python
-            st.code(str(trama_final_lista), language='python')
+        st.markdown("---")
+        
+        # --- PASO 2: Extraer de TXT y armar trama ---
+        st.subheader("Paso 2: Adjuntar archivo de recaudo para armar la trama")
+        st.info("Opcional: Sube el TXT del banco para extraer Operación, Fecha y Monto de forma automática para los TINs consultados.")
+        
+        col_psp, col_cur = st.columns(2)
+        with col_psp:
+            file_psp = st.selectbox("Banco Origen (PSP)", ["BCP", "BBVA", "IBK", "SCOTIA", "KASNET"])
+        with col_cur:
+            file_currency = st.selectbox("Moneda del Archivo", ["PEN", "USD"])
+            
+        uploaded_file = st.file_uploader("Sube el archivo .TXT (Dejar vacío para trama incompleta)", type=['txt'])
+
+        if st.button("Generar Trama Consolidada", type="primary"):
+            trama_generada = []
+            parsed_txt_data = {}
+            
+            # Si el usuario subió un archivo, lo parseamos y guardamos en un diccionario
+            if uploaded_file is not None:
+                lines = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
+                for line in lines:
+                    if len(line.strip()) >= 149:
+                        try:
+                            tin = line[37:49].strip()
+                            date_str = line[82:90]
+                            amount_str = line[96:109]
+                            op_str = line[141:149]
+                            
+                            if not re.match(r'^\d+$', tin): continue
+                            
+                            dt = datetime.strptime(date_str, "%Y%m%d")
+                            excel_date = str((dt - datetime(1899, 12, 30)).days)
+                            amount = float(amount_str) / 100.0
+                            
+                            parsed_txt_data[tin] = {
+                                'VOUCHER_PSP': file_psp,
+                                'VOUCHER_Currency': file_currency,
+                                'VOUCHER_Amount': amount,
+                                'VOUCHER_Operacion_PSP': op_str,
+                                'VOUCHER_FECHA': excel_date
+                            }
+                        except Exception:
+                            pass
+            else:
+                st.warning("No se subió archivo TXT. Se generará una trama con campos por completar.")
+
+            # Cruzar la información consultada con lo encontrado en el TXT
+            for res in st.session_state.tin_search_results:
+                tin_clean = res["tin"]
+                data = res["data"]
+                
+                if data is not None:
+                    if tin_clean in parsed_txt_data:
+                        # Relleno exacto desde el TXT
+                        txt_info = parsed_txt_data[tin_clean]
+                        trama_generada.append({
+                            'VOUCHER_PSP': txt_info['VOUCHER_PSP'],
+                            'VOUCHER_PSP_TIN': tin_clean,
+                            'VOUCHER_Currency': txt_info['VOUCHER_Currency'],
+                            'VOUCHER_Amount': txt_info['VOUCHER_Amount'],
+                            'VOUCHER_Operacion_PSP': txt_info['VOUCHER_Operacion_PSP'],
+                            'VOUCHER_FECHA': txt_info['VOUCHER_FECHA']
+                        })
+                    else:
+                        # Relleno base si no se subió TXT o no se encontró en el archivo
+                        monto_api = data.get("total", {}).get("value", 0)
+                        moneda_api = data.get("total", {}).get("currency", "")
+                        trama_generada.append({
+                            'VOUCHER_PSP': 'COMPLETAR_BANCO',
+                            'VOUCHER_PSP_TIN': tin_clean,
+                            'VOUCHER_Currency': moneda_api,
+                            'VOUCHER_Amount': monto_api,
+                            'VOUCHER_Operacion_PSP': 'COMPLETAR_OPERACION',
+                            'VOUCHER_FECHA': 'COMPLETAR_FECHA'
+                        })
+
+            st.session_state.trama_final_lista = trama_generada
+
+        # --- MOSTRAR TRAMA GENERADA ---
+        if st.session_state.trama_final_lista:
+            st.success("Trama consolidada con éxito.")
+            st.markdown("### 📋 Trama generada (Lista para copiar y pegar):")
+            st.info("Copia el siguiente bloque y pégalo en la pestaña 'Procesar Pagos Manuales'.")
+            st.code(str(st.session_state.trama_final_lista), language='python')
 
 # ==========================================
 # PESTAÑA 2: PROCESAR PAGOS
