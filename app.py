@@ -9,6 +9,7 @@ import requests
 import pandas as pd
 import ast
 import re
+from datetime import datetime
 
 # ==========================================
 # CONFIGURACIÓN DE PÁGINA
@@ -124,6 +125,7 @@ with tab_consultar:
                 # Extraemos el nombre y monto
                 order_name = data.get("name") or data.get("metadata", {}).get("order_name", "SIN NOMBRE")
                 monto_encontrado = data.get("total", {}).get("value", 0)
+                moneda_encontrada = data.get("total", {}).get("currency", "")
 
                 activity_list = data.get("activity_list") or []
                 activity_desc = "SIN ACTIVITY"
@@ -143,6 +145,18 @@ with tab_consultar:
                 header_text = f"✅ {tin_clean} | {order_name} | {activity_desc} | estado: {activity_status} | Monto: {monto_encontrado}"
                 st.subheader(header_text)
                 
+                # --- NUEVA FUNCIONALIDAD: PLANTILLA SUGERIDA ---
+                st.markdown("**Plantilla sugerida para la pestaña de Pagos:** *(Copia y completa los datos faltantes)*")
+                plantilla_sugerida = {
+                    'VOUCHER_PSP': 'COMPLETAR_BANCO (Ej: IBK)',
+                    'VOUCHER_PSP_TIN': tin_clean,
+                    'VOUCHER_Currency': moneda_encontrada,
+                    'VOUCHER_Amount': monto_encontrado,
+                    'VOUCHER_Operacion_PSP': 'COMPLETAR_OPERACION',
+                    'VOUCHER_FECHA': 'COMPLETAR_FECHA'
+                }
+                st.code(str(plantilla_sugerida), language='python')
+                
                 with st.expander("Ver JSON Completo"):
                     st.json(data)
             else:
@@ -159,34 +173,85 @@ with tab_pagar:
         usuario_operacion = st.text_input("Iniciales de Usuario (_USUARIO_OPERACION)", value="KNC")
     
     with col2:
+        input_method = st.radio("Método de entrada de Vouchers:", ["Subir Archivo TXT (Recaudo Banco)", "Pegar Trama Manualmente"], horizontal=True)
+
+    data_VOUCHER = []
+
+    # Lógica 1: Leer desde un archivo TXT adjunto
+    if input_method == "Subir Archivo TXT (Recaudo Banco)":
+        col_psp, col_cur, col_file = st.columns([1, 1, 2])
+        with col_psp:
+            file_psp = st.selectbox("Banco Origen (PSP)", ["BCP", "BBVA", "IBK", "SCOTIA", "KASNET"])
+        with col_cur:
+            file_currency = st.selectbox("Moneda del Archivo", ["PEN", "USD"])
+        with col_file:
+            uploaded_file = st.file_uploader("Sube el archivo .TXT", type=['txt'])
+        
+        if uploaded_file is not None:
+            lines = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
+            for line in lines:
+                # Validar que la línea tenga la longitud suficiente para ser un registro de pago
+                if len(line.strip()) >= 149:
+                    try:
+                        # Parseando el formato posicional del TXT
+                        tin = line[37:49].strip()
+                        date_str = line[82:90]
+                        amount_str = line[96:109]
+                        op_str = line[141:149]
+                        
+                        # Convertir fecha de YYYYMMDD a formato Serial Excel (Ej. 46134)
+                        dt = datetime.strptime(date_str, "%Y%m%d")
+                        excel_date = str((dt - datetime(1899, 12, 30)).days)
+                        
+                        # Convertir monto (13 caracteres: 11 enteros, 2 decimales)
+                        amount = float(amount_str) / 100.0
+                        
+                        data_VOUCHER.append({
+                            'VOUCHER_PSP': file_psp,
+                            'VOUCHER_PSP_TIN': tin,
+                            'VOUCHER_Currency': file_currency,
+                            'VOUCHER_Amount': amount,
+                            'VOUCHER_Operacion_PSP': op_str,
+                            'VOUCHER_FECHA': excel_date
+                        })
+                    except Exception as e:
+                        pass # Ignorar líneas de cabecera o pie de página que no cumplan el formato
+                        
+            if not data_VOUCHER:
+                st.warning("No se pudo extraer información. Verifica que sea el formato TXT de recaudo bancario correcto.")
+            else:
+                st.success(f"✅ ¡Éxito! Se extrajeron {len(data_VOUCHER)} vouchers del archivo correctamente.")
+                
+    # Lógica 2: Leer desde trama de texto pegada manualmente
+    else:
         trama_ejemplo = "[{'VOUCHER_PSP':'IBK','VOUCHER_PSP_TIN': '261122515932','VOUCHER_Currency': 'PEN','VOUCHER_Amount': 160,'VOUCHER_Operacion_PSP': '00005843','VOUCHER_FECHA':'46134'}]"
         trama_texto = st.text_area("Pegar Trama de Vouchers (Diccionario o Lista Python)", value=trama_ejemplo, height=150)
+        
+        if trama_texto.strip():
+            try:
+                data_VOUCHER = ast.literal_eval(trama_texto)
+                if isinstance(data_VOUCHER, dict):
+                    data_VOUCHER = [data_VOUCHER]
+                if not isinstance(data_VOUCHER, list) or len(data_VOUCHER) == 0:
+                    st.error("El formato debe ser un diccionario o una lista de diccionarios.")
+                    data_VOUCHER = []
+            except Exception as e:
+                st.error(f"❌ Error al leer la trama. Verifica el formato. Detalle: {e}")
+                data_VOUCHER = []
 
-    # Botón para ejecutar
+    # Botón para ejecutar el proceso masivo
     if st.button("🚀 Procesar Pagos", type="primary", key="btn_procesar_pagos"):
         
         if not usuario_operacion.strip():
             st.error("Por favor, ingresa las iniciales del usuario.")
             st.stop()
             
-        if not trama_texto.strip():
-            st.error("La trama de vouchers no puede estar vacía.")
-            st.stop()
-
-        # 1. Parsear la trama de texto a un objeto Python de forma segura
-        try:
-            data_VOUCHER = ast.literal_eval(trama_texto)
-            if isinstance(data_VOUCHER, dict):
-                data_VOUCHER = [data_VOUCHER]
-            if not isinstance(data_VOUCHER, list) or len(data_VOUCHER) == 0:
-                raise ValueError("El formato debe ser un diccionario o una lista de diccionarios.")
-                
-        except Exception as e:
-            st.error(f"❌ Error al leer la trama. Verifica el formato. Detalle: {e}")
+        if not data_VOUCHER:
+            st.error("No hay vouchers para procesar. Sube un archivo TXT válido o pega una trama.")
             st.stop()
 
         df_VOUCHER = pd.DataFrame(data_VOUCHER)
-        with st.expander("Vouchers Leídos", expanded=False):
+        with st.expander("Vouchers Leídos (Vista Previa)", expanded=False):
             st.dataframe(df_VOUCHER, use_container_width=True)
 
         with st.spinner('Consultando Invoices en API...'):
