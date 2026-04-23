@@ -141,40 +141,90 @@ with tab_consultar:
         
         # --- PASO 2: Extraer de TXT y armar trama ---
         st.subheader("Paso 2: Adjuntar archivo de recaudo para armar la trama")
-        st.info("Opcional: Sube el TXT del banco para extraer Operación, Fecha y Monto de forma automática para los TINs consultados.")
+        st.info("Opcional: Sube el TXT del banco (BBVA, BCP o IBK). El sistema detectará automáticamente el banco, la moneda y extraerá los datos exactos.")
         
-        col_psp, col_cur = st.columns(2)
-        with col_psp:
-            file_psp = st.selectbox("Banco Origen (PSP)", ["BCP", "BBVA", "IBK", "SCOTIA", "KASNET"])
-        with col_cur:
-            file_currency = st.selectbox("Moneda del Archivo", ["PEN", "USD"])
-            
-        uploaded_file = st.file_uploader("Sube el archivo .TXT (Dejar vacío para trama incompleta)", type=['txt'])
+        uploaded_file = st.file_uploader("Sube el archivo .TXT (Dejar vacío para generar trama manual)", type=['txt'])
 
         if st.button("Generar Trama Consolidada", type="primary"):
             trama_generada = []
             parsed_txt_data = {}
+            banco_detectado = "DESCONOCIDO"
+            moneda_detectada = "PEN"
             
-            # Si el usuario subió un archivo, lo parseamos y guardamos en un diccionario
+            # Si el usuario subió un archivo, lo parseamos
             if uploaded_file is not None:
-                lines = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-                for line in lines:
-                    if len(line.strip()) >= 149:
+                file_content = uploaded_file.getvalue()
+                filename = uploaded_file.name
+                lines = file_content.decode("utf-8", errors="ignore").splitlines()
+                
+                if lines:
+                    first_line = lines[0]
+                    
+                    # 1. Identificación Inteligente de Banco y Moneda
+                    if first_line.startswith("0120"):
+                        banco_detectado = "BBVA"
+                        if "USD" in first_line[16:25]:
+                            moneda_detectada = "USD"
+                        elif "PEN" in first_line[16:25]:
+                            moneda_detectada = "PEN"
+                    elif first_line.startswith("0791501"):
+                        banco_detectado = "IBK"
+                        moneda_detectada = "PEN"
+                    elif first_line.startswith("0791502"):
+                        banco_detectado = "IBK"
+                        moneda_detectada = "USD"
+                    elif first_line.startswith("CC"):
+                        banco_detectado = "BCP"
+                        if "1941" in first_line[0:15] or "DOLARES" in filename.upper():
+                            moneda_detectada = "USD"
+                        else:
+                            moneda_detectada = "PEN"
+                            
+                    if banco_detectado != "DESCONOCIDO":
+                        st.success(f"🏦 Archivo reconocido: **{banco_detectado}** | Moneda: **{moneda_detectada}**")
+                    else:
+                        st.warning("⚠️ No se pudo identificar automáticamente el formato del banco. Se intentará leer genéricamente.")
+
+                    # 2. Extracción posicional específica según banco
+                    for line in lines:
                         try:
-                            tin = line[37:49].strip()
-                            date_str = line[82:90]
-                            amount_str = line[96:109]
-                            op_str = line[141:149]
+                            tin, date_str, amount_str, op_str = None, None, None, None
                             
-                            if not re.match(r'^\d+$', tin): continue
-                            
+                            if banco_detectado == "IBK" and (line.startswith("0791501") or line.startswith("0791502")):
+                                if len(line) < 149: continue
+                                tin = line[37:49].strip()
+                                date_str = line[82:90]
+                                amount_str = line[96:109]
+                                op_str = line[141:149].strip()
+                                
+                            elif banco_detectado == "BBVA" and line.startswith("02"):
+                                if len(line) < 140: continue
+                                tin = line[48:60].strip()
+                                op_str = line[70:80].strip()
+                                amount_str = line[80:95]
+                                date_str = line[135:143] 
+                                
+                            elif banco_detectado == "BCP" and line.startswith("DD"):
+                                if len(line) < 150: continue
+                                tin = line[15:27].strip()
+                                date_str = line[57:65]
+                                amount_str = line[73:88]
+                                op_str = line[143:149].strip()
+                                
+                            # Si detectó un TIN válido
+                            if not tin or not re.match(r'^\d+$', tin):
+                                continue
+                                
+                            # Convertir fecha
                             dt = datetime.strptime(date_str, "%Y%m%d")
                             excel_date = str((dt - datetime(1899, 12, 30)).days)
+                            
+                            # Convertir monto (siempre asume los últimos 2 dígitos como decimales para recaudación PE)
                             amount = float(amount_str) / 100.0
                             
                             parsed_txt_data[tin] = {
-                                'VOUCHER_PSP': file_psp,
-                                'VOUCHER_Currency': file_currency,
+                                'VOUCHER_PSP': banco_detectado,
+                                'VOUCHER_Currency': moneda_detectada,
                                 'VOUCHER_Amount': amount,
                                 'VOUCHER_Operacion_PSP': op_str,
                                 'VOUCHER_FECHA': excel_date
@@ -182,9 +232,9 @@ with tab_consultar:
                         except Exception:
                             pass
             else:
-                st.warning("No se subió archivo TXT. Se generará una trama con campos por completar.")
+                st.warning("No se subió archivo TXT. Se generará una trama con campos por completar manualmente.")
 
-            # Cruzar la información consultada con lo encontrado en el TXT
+            # 3. Cruzar la información consultada con lo encontrado en el TXT
             for res in st.session_state.tin_search_results:
                 tin_clean = res["tin"]
                 data = res["data"]
@@ -202,7 +252,7 @@ with tab_consultar:
                             'VOUCHER_FECHA': txt_info['VOUCHER_FECHA']
                         })
                     else:
-                        # Relleno base si no se subió TXT o no se encontró en el archivo
+                        # Relleno base si no se subió TXT o el TIN no está en el archivo
                         monto_api = data.get("total", {}).get("value", 0)
                         moneda_api = data.get("total", {}).get("currency", "")
                         trama_generada.append({
