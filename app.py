@@ -402,7 +402,7 @@ with tab_consultar:
             st.subheader("3. Ejecución de Pagos")
             
             df_preview = pd.DataFrame(st.session_state.trama_final_lista)
-            st.dataframe(df_preview, use_container_width=True)
+            st.dataframe(df_preview)
             
             col_u1, col_u2 = st.columns([1, 2])
             with col_u1:
@@ -440,8 +440,7 @@ with tab_consultar:
                     st.error("Se registraron errores durante el procesamiento de algunas operaciones. Revise el detalle.")
                     
                 st.dataframe(
-                    df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']], 
-                    use_container_width=True
+                    df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
                 )
 
 # ==========================================
@@ -479,7 +478,7 @@ with tab_pagar:
 
         df_voucher_prev = pd.DataFrame(data_voucher_manual)
         with st.expander("Detalle de registros a procesar", expanded=False):
-            st.dataframe(df_voucher_prev, use_container_width=True)
+            st.dataframe(df_voucher_prev)
 
         with st.spinner("Validando registros con el sistema central..."):
             tin_list_manual = df_voucher_prev['VOUCHER_PSP_TIN'].dropna().unique().tolist()
@@ -508,6 +507,5 @@ with tab_pagar:
             st.error("Se registraron anomalías en el procesamiento. Verifique los códigos de estado.")
             
         st.dataframe(
-            df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']], 
-            use_container_width=True
+            df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
         )
