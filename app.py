@@ -271,8 +271,6 @@ if "tin_search_results" not in st.session_state:
     st.session_state.tin_search_results = None
 if "trama_final_lista" not in st.session_state:
     st.session_state.trama_final_lista = None
-
-# Inicialización de estado para bloqueo de UI (Candado contra clics dobles - requerido por la tab de main.py)
 if "procesando" not in st.session_state:
     st.session_state.procesando = False
 
@@ -282,7 +280,6 @@ if "procesando" not in st.session_state:
 st.title("Procesamiento de Pagos KashIO")
 st.markdown("Plataforma operativa para consulta y regularización de operaciones.")
 
-# SE AÑADIÓ LA TERCERA PESTAÑA A LA DEFINICIÓN
 tab_consultar, tab_pagar, tab_consultar_tin_main = st.tabs(["Consulta y Procesamiento Automático", "Procesamiento Manual", "CONSULTAR TIN (Main)"])
 
 # ==========================================
@@ -402,7 +399,6 @@ with tab_consultar:
         else:
             st.info("No existen operaciones pendientes de regularización para los TINs consultados.")
 
-        # PROCESAMIENTO FINAL EN PESTAÑA 1
         if st.session_state.trama_final_lista is not None and len(st.session_state.trama_final_lista) > 0:
             st.markdown("---")
             st.subheader("3. Ejecución de Pagos")
@@ -516,11 +512,22 @@ with tab_pagar:
             df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
         )
 
-# ==========================================
-# PESTAÑA 3: CONSULTAR TIN (Copiado desde main.py)
-# ==========================================
+# ==================================================
+# PESTAÑA 3: CONSULTAR TIN (Mapeo dinámico a Tabla)
+# ==================================================
 with tab_consultar_tin_main:
-    st.subheader("Buscador de Códigos PSP_TIN")
+    st.subheader("Buscador de Códigos PSP_TIN y Generador de Datos")
+
+    # Carga opcional de TXT bancario para auto-rellenar las columnas de origen financiero
+    uploaded_file_tab3 = st.file_uploader(
+        "Adjunte el archivo TXT bancario para completar automáticamente Banco, Nro OP y VOUCHER_FECHA (Opcional)", 
+        type=['txt'], 
+        key="uploader_tab3"
+    )
+    
+    parsed_txt_data = {}
+    if uploaded_file_tab3 is not None:
+        parsed_txt_data, _, _ = procesar_archivo_bancario(uploaded_file_tab3.getvalue(), uploaded_file_tab3.name)
 
     raw_input_tin = st.text_area(
         "Ingrese códigos (separados por comas o saltos de línea)", 
@@ -543,7 +550,6 @@ with tab_consultar_tin_main:
 
             for idx, tin_clean in enumerate(tin_list, 1):
                 try:
-                    # NOTA: Mapeado internamente a SERVICE_URL para que funcione el request en app.py
                     r = requests.get(f"{SERVICE_URL}/consultar/{tin_clean}?search_by=PSP_TIN", headers={'Content-Type':'text/plain', 'User-Agent':'PostmanRuntime'}, timeout=15)
                     resultados_memoria.append({"tin": tin_clean, "data": r.json() if r.status_code==200 else None, "error": r.status_code if r.status_code!=200 else None, "text": r.text})
                 except Exception as e:
@@ -551,40 +557,99 @@ with tab_consultar_tin_main:
                 prog.progress(int((idx/total)*100))
     
             st.session_state.tin_search_results = resultados_memoria
-            st.success("Búsqueda finalizada.")
+            st.success("Búsqueda y extracción finalizada.")
         st.session_state.procesando = False
 
     if st.session_state.tin_search_results:
-        es_unico = (len(st.session_state.tin_search_results) == 1)
+        tabla_rows = []
+        trama_tab2_lines = []
+        
+        now = datetime.now()
+        fecha_revision = now.strftime("%d/%m/%Y")
+        mes_revision = now.strftime("%B")
+        
         for res in st.session_state.tin_search_results:
-            t = res["tin"]; d = res["data"]
+            t = res["tin"]
+            d = res["data"]
+            
+            # Recuperación cruzada de datos del archivo de recaudo si existe coincidencia
+            txt_info = parsed_txt_data.get(t, {})
+            banco = txt_info.get('VOUCHER_PSP', 'COMPLETAR_BANCO')
+            nro_op = txt_info.get('VOUCHER_Operacion_PSP', 'COMPLETAR_OPERACION')
+            voucher_fecha = txt_info.get('VOUCHER_FECHA', 'COMPLETAR_FECHA')
+            
             if d:
-                order_name = d.get("name") or d.get("metadata", {}).get("order_name", "SIN NOMBRE")
-                monto = float(d.get("total", {}).get("value", 0))
+                empresa = d.get("creditor", {}).get("name", "N/A")
                 
-                act_desc = "SIN ACTIVITY"; act_stat = "SIN ESTADO"
-                for act in (d.get("activity_list") or []):
-                    if isinstance(act, dict) and (act.get("description") or act.get("status")):
-                        act_desc = act.get("description") or act.get("name") or act_desc
-                        act_stat = act.get("status") or act_stat; break
-
-                st.markdown(f"**TIN {t}** | `{order_name}` | {act_desc} | Estado: **{act_stat}**")
+                activity_list = d.get("activity_list", [])
+                estado = activity_list[0].get("name", "N/A") if (isinstance(activity_list, list) and len(activity_list) > 0) else "N/A"
                 
-                # ENVOLTURA TRY-EXCEPT PARA EVITAR CAÍDA POR FUNCIONES NO MIGRADAS
-                try:
-                    cliente_adivinado = detectar_cliente(order_name)
-                    if monto > 0:
-                        if cliente_adivinado:
-                            st.info(f"Sugerencia: **{cliente_adivinado}** | Importe: **{monto:,.2f}**")
-                            if es_unico:
-                                if st.button(f"Acreditar {monto:,.2f} a {cliente_adivinado}", key=f"btn_acr_{t}", type="primary", disabled=st.session_state.procesando):
-                                    ejecutar_operacion_con_validacion(cliente_adivinado, monto, "Acreditación", "")
-                            else: st.caption("Botón inhabilitado (Modo lectura múltiple).")
-                        else: st.warning(f"Monto: {monto:,.2f} - No se logró vincular a un cliente interno.")
-                except NameError:
-                    st.warning("⚠️ *Aviso de Refactorización*: Las funciones 'detectar_cliente' y 'ejecutar_operacion_con_validacion' no existen actualmente en app.py. Las sugerencias de acreditación rápida están temporalmente inactivas.")
-
-                with st.expander("Ver detalle JSON de la respuesta", expanded=False): st.json(d)
-                st.divider()
+                public_id = d.get("public_id", "N/A")
+                pen = d.get("sub_total", {}).get("currency", "N/A")
+                
+                try: monto_voucher = float(d.get("sub_total", {}).get("value", 0.0))
+                except: monto_voucher = 0.0
+                    
+                try: monto_kashio = float(d.get("total", {}).get("value", 0.0))
+                except: monto_kashio = 0.0
+                    
+                balance = monto_voucher - monto_kashio
+                
+                # Inserción estructurada mapeando los requerimientos exactos
+                row = {
+                    "Tipo": "Reg.Interna",
+                    "Tipo2": "EECC",
+                    "Empresa": empresa,
+                    "Fecha de revisión": fecha_revision,
+                    "Mes": mes_revision,
+                    "PSP_TIN": t,
+                    "PSP_TIN concatenado": f"'{t}',",
+                    "Estado": estado,
+                    "Public ID": public_id,
+                    "inv_id concatenado": f"'{public_id}',",
+                    "PEN": pen,
+                    "Monto voucher": monto_voucher,
+                    "Monto Kashio": monto_kashio,
+                    "Balance": balance,
+                    "CANAL": "WEB",
+                    "Banco": banco,
+                    "Nro OP": nro_op,
+                    "VOUCHER_FECHA": voucher_fecha
+                }
+                tabla_rows.append(row)
+                
+                # Construcción paralela de la trama esperada por la pestaña 2
+                trama_line = f"{{'VOUCHER_PSP':'{banco}','VOUCHER_PSP_TIN': '{t}','VOUCHER_Currency': '{pen}','VOUCHER_Amount': {monto_voucher},'VOUCHER_Operacion_PSP': '{nro_op}','VOUCHER_FECHA':'{voucher_fecha}'}},"
+                trama_tab2_lines.append(trama_line)
             else:
-                st.error(f"Error HTTP {res['error']} para TIN {t}"); st.caption(res.get("text", ""))
+                # Fila de contingencia por fallas de respuesta en API central
+                row = {
+                    "Tipo": "Reg.Interna",
+                    "Tipo2": "EECC",
+                    "Empresa": "ERROR EN CONSULTA",
+                    "Fecha de revisión": fecha_revision,
+                    "Mes": mes_revision,
+                    "PSP_TIN": t,
+                    "PSP_TIN concatenado": f"'{t}',",
+                    "Estado": f"Error HTTP {res.get('error')}",
+                    "Public ID": "N/A",
+                    "inv_id concatenado": "N/A",
+                    "PEN": "N/A",
+                    "Monto voucher": 0.0,
+                    "Monto Kashio": 0.0,
+                    "Balance": 0.0,
+                    "CANAL": "WEB",
+                    "Banco": banco,
+                    "Nro OP": nro_op,
+                    "VOUCHER_FECHA": voucher_fecha
+                }
+                tabla_rows.append(row)
+        
+        if tabla_rows:
+            df_tabla = pd.DataFrame(tabla_rows)
+            st.markdown("### 📋 Tabla de Conciliación (Copiable)")
+            st.dataframe(df_tabla, use_container_width=True)
+            
+            st.markdown("### 🔗 Trama de salida para la Pestaña 2")
+            trama_completa_str = "\n".join(trama_tab2_lines)
+            st.text_area("Copia estas líneas y pégalas directamente dentro del cuadro de texto de la Pestaña 2:", value=trama_completa_str, height=180)
