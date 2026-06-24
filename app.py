@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplicación Streamlit de procesamiento de pagos KashIO.
-Versión corporativa optimizada - Flujo unificado.
+Versión corporativa optimizada - Flujo unificado con visor JSON.
 """
 
 import streamlit as st
@@ -46,6 +46,8 @@ def inicializar_estados():
         st.session_state.trama_generada = ""
     if "alertas_pagados" not in st.session_state:
         st.session_state.alertas_pagados = []
+    if "raw_api_results" not in st.session_state:
+        st.session_state.raw_api_results = []
 
 inicializar_estados()
 
@@ -245,7 +247,15 @@ with col_a:
 with col_b:
     archivo_txt = st.file_uploader("Archivo bancario (Opcional)", type=['txt'])
 
-if st.button("Ejecutar Consulta", type="primary"):
+# Distribución de botones lado a lado
+col_btn1, col_btn2, col_spacer = st.columns([1.5, 1.5, 7])
+
+with col_btn1:
+    btn_consulta = st.button("Ejecutar Consulta", type="primary", use_container_width=True)
+with col_btn2:
+    btn_json = st.button("Revisar Respuestas JSON", type="secondary", use_container_width=True)
+
+if btn_consulta:
     candidatos = re.findall(r'\d+', input_tins)
     tins_validos = [t[2:] if (t.startswith("00") and len(t)>12) else t for t in candidatos if len(t)==12 or (t.startswith("00") and len(t[2:])==12)]
     
@@ -261,6 +271,20 @@ if st.button("Ejecutar Consulta", type="primary"):
             
             st.session_state.df_conciliacion = df_final
             st.session_state.alertas_pagados = pagados
+            st.session_state.raw_api_results = res_api
+
+# Despliegue técnico de las respuestas JSON crudas si se presiona el botón respectivo
+if btn_json:
+    if not st.session_state.raw_api_results:
+        st.info("Debe ejecutar una consulta previa para cargar los registros en memoria.")
+    else:
+        st.markdown("### Respuestas Crudas del Servidor")
+        for registro in st.session_state.raw_api_results:
+            with st.expander(f"Código TIN: {registro['tin']}", expanded=False):
+                if registro['data']:
+                    st.json(registro['data'])
+                else:
+                    st.error(f"Sin datos legibles. Código de error HTTP o Red: {registro['error']}")
 
 # ------------------------------------------
 # SECCION 2: RESULTADOS Y CONCILIACION
@@ -274,7 +298,6 @@ if not st.session_state.df_conciliacion.empty:
 
     df_editado = st.data_editor(st.session_state.df_conciliacion, num_rows="dynamic", use_container_width=True)
     
-    # Sincronización en vivo
     trama_texto_vivo = extraer_trama_desde_df(df_editado)
     st.session_state.trama_generada = trama_texto_vivo
     
