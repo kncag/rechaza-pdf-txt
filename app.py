@@ -82,7 +82,17 @@ def procesar_archivo_bancario(file_content, filename):
     banco_detectado = "DESCONOCIDO"
     moneda_detectada = "PEN"
     
-    lines = file_content.decode("utf-8", errors="ignore").splitlines()
+    # 1. CAMBIO CLAVE: Decodificar con 'latin-1' garantiza que 1 byte = 1 caracter.
+    # Así ninguna línea pierde su longitud si el banco envía basura.
+    raw_text = file_content.decode("latin-1", errors="replace")
+    
+    # 2. SANITIZACIÓN DE LONGITUD FIJA:
+    # Reemplazamos todo lo que NO sea un caracter ASCII imprimible (letras sin tilde, números) 
+    # o saltos de línea (\r\n) por un ESPACIO EN BLANCO. 
+    # Esto salva la estructura sin desplazar las posiciones numéricas de la trama.
+    clean_text = re.sub(r'[^\x20-\x7E\r\n]', ' ', raw_text)
+    
+    lines = clean_text.splitlines()
     if not lines:
         return parsed_data, banco_detectado, moneda_detectada
 
@@ -111,26 +121,26 @@ def procesar_archivo_bancario(file_content, filename):
             
             if banco_detectado == "IBK" and (line.startswith("0791501") or line.startswith("0791502")):
                 if len(line) < 149: continue
-                tin = line[37:49].strip()
-                date_str = line[82:90]
-                amount_str = line[96:109]
+                tin = re.sub(r'[^\d]', '', line[37:49])
+                date_str = re.sub(r'[^\d]', '', line[82:90])
+                amount_str = re.sub(r'[^\d]', '', line[96:109])
                 op_str = line[141:149].strip()
                 
             elif banco_detectado == "BBVA" and line.startswith("02"):
                 if len(line) < 140: continue
-                tin = line[48:60].strip()
+                tin = re.sub(r'[^\d]', '', line[48:60])
                 op_str = line[70:80].strip()
-                amount_str = line[80:95]
-                date_str = line[135:143] 
+                amount_str = re.sub(r'[^\d]', '', line[80:95])
+                date_str = re.sub(r'[^\d]', '', line[135:143]) 
                 
             elif banco_detectado == "BCP" and line.startswith("DD"):
                 if len(line) < 150: continue
-                tin = line[15:27].strip()
-                date_str = line[57:65]
-                amount_str = line[73:88]
+                tin = re.sub(r'[^\d]', '', line[15:27])
+                date_str = re.sub(r'[^\d]', '', line[57:65])
+                amount_str = re.sub(r'[^\d]', '', line[73:88])
                 op_str = line[143:149].strip()
                 
-            if not tin or not re.match(r'^\d+$', tin):
+            if not tin or not date_str or not amount_str:
                 continue
                 
             # Transformación de datos
@@ -518,7 +528,6 @@ with tab_pagar:
 with tab_consultar_tin_main:
     st.subheader("Buscador de Códigos PSP_TIN y Generador de Datos")
 
-    # Carga opcional de TXT bancario para auto-rellenar las columnas de origen financiero
     uploaded_file_tab3 = st.file_uploader(
         "Adjunte el archivo TXT bancario para completar automáticamente Banco, Nro OP y VOUCHER_FECHA (Opcional)", 
         type=['txt'], 
@@ -572,7 +581,6 @@ with tab_consultar_tin_main:
             t = res["tin"]
             d = res["data"]
             
-            # Recuperación cruzada de datos del archivo de recaudo si existe coincidencia
             txt_info = parsed_txt_data.get(t, {})
             banco = txt_info.get('VOUCHER_PSP', 'COMPLETAR_BANCO')
             nro_op = txt_info.get('VOUCHER_Operacion_PSP', 'COMPLETAR_OPERACION')
@@ -595,7 +603,6 @@ with tab_consultar_tin_main:
                     
                 balance = monto_voucher - monto_kashio
                 
-                # Inserción estructurada mapeando los requerimientos exactos
                 row = {
                     "Tipo": "Reg.Interna",
                     "Tipo2": "EECC",
@@ -618,11 +625,9 @@ with tab_consultar_tin_main:
                 }
                 tabla_rows.append(row)
                 
-                # Construcción paralela de la trama esperada por la pestaña 2
                 trama_line = f"{{'VOUCHER_PSP':'{banco}','VOUCHER_PSP_TIN': '{t}','VOUCHER_Currency': '{pen}','VOUCHER_Amount': {monto_voucher},'VOUCHER_Operacion_PSP': '{nro_op}','VOUCHER_FECHA':'{voucher_fecha}'}},"
                 trama_tab2_lines.append(trama_line)
             else:
-                # Fila de contingencia por fallas de respuesta en API central
                 row = {
                     "Tipo": "Reg.Interna",
                     "Tipo2": "EECC",
