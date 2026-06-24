@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Aplicación Streamlit de procesamiento de pagos KashIO.
-Versión corporativa optimizada - Flujo unificado con visor JSON.
+Versión corporativa optimizada - Flujo unificado con visor JSON y Alertas Visuales.
 """
 
 import streamlit as st
@@ -229,6 +229,29 @@ def evaluar_trama_texto(texto):
     if not clean.startswith("["): clean = f"[{clean}]"
     return ast.literal_eval(clean)
 
+def aplicar_alertas_tabla(row):
+    """Aplica formato condicional rojo según reglas de negocio para descuadres y montos altos."""
+    estilos = [''] * len(row)
+    
+    # 1. Alerta de descuadre: Balance con diferencia mayor a 5 (positivo o negativo)
+    if 'Balance' in row.index:
+        idx = row.index.get_loc('Balance')
+        try:
+            if abs(float(row['Balance'])) > 5:
+                estilos[idx] = 'background-color: #ffe6e6; color: #cc0000; font-weight: bold;'
+        except: pass
+        
+    # 2. Alerta de monto alto: Voucher o Kashio >= 500
+    for col in ['Monto voucher', 'Monto Kashio']:
+        if col in row.index:
+            idx = row.index.get_loc(col)
+            try:
+                if float(row[col]) >= 500:
+                    estilos[idx] = 'background-color: #ffe6e6; color: #cc0000; font-weight: bold;'
+            except: pass
+            
+    return estilos
+
 # ==========================================
 # 3. INTERFAZ DE USUARIO (PRESENTACION)
 # ==========================================
@@ -296,8 +319,13 @@ if not st.session_state.df_conciliacion.empty:
     if st.session_state.alertas_pagados:
         st.warning(f"Se identificaron {len(st.session_state.alertas_pagados)} operaciones con estado previo de liquidación (PAID): {', '.join(st.session_state.alertas_pagados)}")
 
-    df_editado = st.data_editor(st.session_state.df_conciliacion, num_rows="dynamic", use_container_width=True)
+    # Aplicamos el estilo condicional al DataFrame antes de pasarlo al editor
+    df_estilizado = st.session_state.df_conciliacion.style.apply(aplicar_alertas_tabla, axis=1)
     
+    # Renderizamos la tabla permitiendo edición
+    df_editado = st.data_editor(df_estilizado, num_rows="dynamic", use_container_width=True)
+    
+    # Sincronización en vivo
     trama_texto_vivo = extraer_trama_desde_df(df_editado)
     st.session_state.trama_generada = trama_texto_vivo
     
