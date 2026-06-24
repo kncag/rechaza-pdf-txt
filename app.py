@@ -272,13 +272,18 @@ if "tin_search_results" not in st.session_state:
 if "trama_final_lista" not in st.session_state:
     st.session_state.trama_final_lista = None
 
+# Inicialización de estado para bloqueo de UI (Candado contra clics dobles - requerido por la tab de main.py)
+if "procesando" not in st.session_state:
+    st.session_state.procesando = False
+
 # ==========================================
 # INTERFAZ DE USUARIO (UI)
 # ==========================================
 st.title("Procesamiento de Pagos KashIO")
 st.markdown("Plataforma operativa para consulta y regularización de operaciones.")
 
-tab_consultar, tab_pagar = st.tabs(["Consulta y Procesamiento Automático", "Procesamiento Manual"])
+# SE AÑADIÓ LA TERCERA PESTAÑA A LA DEFINICIÓN
+tab_consultar, tab_pagar, tab_consultar_tin_main = st.tabs(["Consulta y Procesamiento Automático", "Procesamiento Manual", "CONSULTAR TIN (Main)"])
 
 # ==========================================
 # PESTAÑA 1: CONSULTAR Y PROCESAR AUTOMÁTICAMENTE
@@ -288,7 +293,8 @@ with tab_consultar:
     raw_input = st.text_area(
         "Ingrese los PSP_TIN (separados por comas o saltos de línea)",
         placeholder="260167375904\n260178160022",
-        height=100
+        height=100,
+        key="txt_area_tab1"
     )
     
     if st.button("Ejecutar Consulta", type="primary"):
@@ -509,3 +515,76 @@ with tab_pagar:
         st.dataframe(
             df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
         )
+
+# ==========================================
+# PESTAÑA 3: CONSULTAR TIN (Copiado desde main.py)
+# ==========================================
+with tab_consultar_tin_main:
+    st.subheader("Buscador de Códigos PSP_TIN")
+
+    raw_input_tin = st.text_area(
+        "Ingrese códigos (separados por comas o saltos de línea)", 
+        placeholder="260167375904\n260178163684", 
+        disabled=st.session_state.procesando, 
+        key="txt_area_tab3"
+    )
+    
+    if st.button("Consultar en Red", key="btn_consultar_tin", disabled=st.session_state.procesando):
+        st.session_state.procesando = True
+        raw_candidates = re.findall(r'\d+', raw_input_tin)
+        tin_candidates = [t[2:] if (t.startswith("00") and len(t)>12) else t for t in raw_candidates if len(t)==12 or (t.startswith("00") and len(t[2:])==12)]
+                
+        if not tin_candidates:
+            st.warning("No se detectaron códigos TIN válidos (12 dígitos).")
+            st.session_state.tin_search_results = None
+        else:
+            tin_list = list(dict.fromkeys(tin_candidates))
+            prog = st.progress(0); total = len(tin_list); resultados_memoria = []
+
+            for idx, tin_clean in enumerate(tin_list, 1):
+                try:
+                    # NOTA: Mapeado internamente a SERVICE_URL para que funcione el request en app.py
+                    r = requests.get(f"{SERVICE_URL}/consultar/{tin_clean}?search_by=PSP_TIN", headers={'Content-Type':'text/plain', 'User-Agent':'PostmanRuntime'}, timeout=15)
+                    resultados_memoria.append({"tin": tin_clean, "data": r.json() if r.status_code==200 else None, "error": r.status_code if r.status_code!=200 else None, "text": r.text})
+                except Exception as e:
+                    resultados_memoria.append({"tin": tin_clean, "data": None, "error": str(e)})
+                prog.progress(int((idx/total)*100))
+    
+            st.session_state.tin_search_results = resultados_memoria
+            st.success("Búsqueda finalizada.")
+        st.session_state.procesando = False
+
+    if st.session_state.tin_search_results:
+        es_unico = (len(st.session_state.tin_search_results) == 1)
+        for res in st.session_state.tin_search_results:
+            t = res["tin"]; d = res["data"]
+            if d:
+                order_name = d.get("name") or d.get("metadata", {}).get("order_name", "SIN NOMBRE")
+                monto = float(d.get("total", {}).get("value", 0))
+                
+                act_desc = "SIN ACTIVITY"; act_stat = "SIN ESTADO"
+                for act in (d.get("activity_list") or []):
+                    if isinstance(act, dict) and (act.get("description") or act.get("status")):
+                        act_desc = act.get("description") or act.get("name") or act_desc
+                        act_stat = act.get("status") or act_stat; break
+
+                st.markdown(f"**TIN {t}** | `{order_name}` | {act_desc} | Estado: **{act_stat}**")
+                
+                # ENVOLTURA TRY-EXCEPT PARA EVITAR CAÍDA POR FUNCIONES NO MIGRADAS
+                try:
+                    cliente_adivinado = detectar_cliente(order_name)
+                    if monto > 0:
+                        if cliente_adivinado:
+                            st.info(f"Sugerencia: **{cliente_adivinado}** | Importe: **{monto:,.2f}**")
+                            if es_unico:
+                                if st.button(f"Acreditar {monto:,.2f} a {cliente_adivinado}", key=f"btn_acr_{t}", type="primary", disabled=st.session_state.procesando):
+                                    ejecutar_operacion_con_validacion(cliente_adivinado, monto, "Acreditación", "")
+                            else: st.caption("Botón inhabilitado (Modo lectura múltiple).")
+                        else: st.warning(f"Monto: {monto:,.2f} - No se logró vincular a un cliente interno.")
+                except NameError:
+                    st.warning("⚠️ *Aviso de Refactorización*: Las funciones 'detectar_cliente' y 'ejecutar_operacion_con_validacion' no existen actualmente en app.py. Las sugerencias de acreditación rápida están temporalmente inactivas.")
+
+                with st.expander("Ver detalle JSON de la respuesta", expanded=False): st.json(d)
+                st.divider()
+            else:
+                st.error(f"Error HTTP {res['error']} para TIN {t}"); st.caption(res.get("text", ""))
