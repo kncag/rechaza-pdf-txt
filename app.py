@@ -10,6 +10,7 @@ import pandas as pd
 import ast
 import re
 from datetime import datetime
+from io import BytesIO  # <-- NUEVA IMPORTACIÓN PARA EXCEL EN MEMORIA
 
 # ==========================================
 # CONFIGURACIÓN DE PÁGINA
@@ -82,14 +83,7 @@ def procesar_archivo_bancario(file_content, filename):
     banco_detectado = "DESCONOCIDO"
     moneda_detectada = "PEN"
     
-    # 1. CAMBIO CLAVE: Decodificar con 'latin-1' garantiza que 1 byte = 1 caracter.
-    # Así ninguna línea pierde su longitud si el banco envía basura.
     raw_text = file_content.decode("latin-1", errors="replace")
-    
-    # 2. SANITIZACIÓN DE LONGITUD FIJA:
-    # Reemplazamos todo lo que NO sea un caracter ASCII imprimible (letras sin tilde, números) 
-    # o saltos de línea (\r\n) por un ESPACIO EN BLANCO. 
-    # Esto salva la estructura sin desplazar las posiciones numéricas de la trama.
     clean_text = re.sub(r'[^\x20-\x7E\r\n]', ' ', raw_text)
     
     lines = clean_text.splitlines()
@@ -202,7 +196,6 @@ def ejecutar_post_pagos(df_validar, usuario_operacion):
                 "metadata": {"code": usuario_operacion, "clave": "AR"} 
             }
 
-            # Extensión de datos si el PSP lo requiere
             if psp == 'BILLETERA-NIUBIZ':
                 payload["metadata"].update({
                     "payment_method": row.get('QR_payment_method', ''),
@@ -297,70 +290,31 @@ tab_consultar, tab_pagar, tab_consultar_tin_main = st.tabs(["Consulta y Procesam
 # ==========================================
 with tab_consultar:
     st.subheader("1. Consulta de estado de operaciones (TIN)")
-    raw_input = st.text_area(
-        "Ingrese los PSP_TIN (separados por comas o saltos de línea)",
-        placeholder="260167375904\n260178160022",
-        height=100,
-        key="txt_area_tab1"
-    )
+    raw_input = st.text_area("Ingrese los PSP_TIN", height=100, key="txt_area_tab1")
     
     if st.button("Ejecutar Consulta", type="primary"):
         st.session_state.trama_final_lista = None
         tin_candidates = re.findall(r'\d+', raw_input)
         
         if not tin_candidates:
-            st.warning("No se detectaron códigos TIN válidos en la entrada proporcionada.")
+            st.warning("No se detectaron códigos.")
             st.session_state.tin_search_results = None
         else:
-            seen = set()
-            tin_list = [t for t in tin_candidates if not (t in seen or seen.add(t))]
-            
-            with st.spinner("Consultando información en la API..."):
+            tin_list = list(dict.fromkeys(tin_candidates))
+            with st.spinner("Consultando..."):
                 st.session_state.tin_search_results = consultar_api_tins(tin_list)
-            st.success("Consulta completada de manera exitosa.")
+            st.success("Consulta completada.")
 
     if st.session_state.tin_search_results:
-        st.markdown("---")
-        st.markdown("### Resumen de Consulta API")
-        
         hay_tins_pendientes = False
-        
         for res in st.session_state.tin_search_results:
-            tin_clean = res["tin"]
-            data = res["data"]
-            
-            if data is not None:
-                status_factura = data.get("status", "")
-                order_name = data.get("name") or data.get("metadata", {}).get("order_name", "Registro sin nombre")
-                
-                if status_factura == "PAID":
-                    paid_date = "Fecha no registrada"
-                    for act in (data.get("activity_list") or []):
-                        if isinstance(act, dict) and act.get("status") == "PAID":
-                            paid_date = act.get("created", paid_date)
-                            break
-                    st.success(f"TIN: {tin_clean} | {order_name} | ESTADO: PAGADO | Fecha registro: {paid_date}")
-                else:
+            if res["data"] is not None:
+                if res["data"].get("status") != "PAID":
                     hay_tins_pendientes = True
-                    activity_list = data.get("activity_list") or []
-                    activity_desc = "Sin actividad registrada"
-                    activity_status = "Desconocido"
-
-                    if isinstance(activity_list, list) and activity_list:
-                        first_act = next((act for act in activity_list if isinstance(act, dict) and (act.get("description") or act.get("status") or act.get("name"))), None)
-                        if first_act:
-                            activity_desc = first_act.get("description") or first_act.get("name") or "Sin descripción"
-                            activity_status = first_act.get("status") or "Desconocido"
-
-                    st.info(f"TIN: {tin_clean} | {order_name} | Actividad: {activity_desc} | Estado actual: {activity_status}")
-            else:
-                st.error(f"TIN: {tin_clean} | Error en consulta | {res.get('error')}")
+                    break
 
         if hay_tins_pendientes:
-            st.markdown("---")
             st.subheader("2. Carga de archivo de recaudo")
-            st.write("Adjunte el archivo TXT bancario correspondiente para generar la trama de pago automático.")
-            
             uploaded_file = st.file_uploader("Archivo de recaudo (.TXT)", type=['txt'])
 
             if st.button("Generar Trama de Datos", type="secondary"):
@@ -368,15 +322,8 @@ with tab_consultar:
                 parsed_txt_data = {}
                 
                 if uploaded_file is not None:
-                    parsed_txt_data, banco, moneda = procesar_archivo_bancario(uploaded_file.getvalue(), uploaded_file.name)
-                    if banco != "DESCONOCIDO":
-                        st.success(f"Archivo procesado: Origen {banco} - Moneda {moneda}")
-                    else:
-                        st.warning("El formato del archivo no coincide con los estándares conocidos (BCP, BBVA, IBK).")
-                else:
-                    st.warning("Procediendo sin archivo adjunto. Se requerirá completar la información manualmente.")
+                    parsed_txt_data, b, m = procesar_archivo_bancario(uploaded_file.getvalue(), uploaded_file.name)
 
-                # Consolidación de datos
                 for res in st.session_state.tin_search_results:
                     tin_clean = res["tin"]
                     data = res["data"]
@@ -393,134 +340,50 @@ with tab_consultar:
                                 'VOUCHER_FECHA': txt_info['VOUCHER_FECHA']
                             })
                         else:
-                            monto_api = data.get("total", {}).get("value", 0)
-                            moneda_api = data.get("total", {}).get("currency", "")
                             trama_generada.append({
                                 'VOUCHER_PSP': 'COMPLETAR_BANCO',
                                 'VOUCHER_PSP_TIN': tin_clean,
-                                'VOUCHER_Currency': moneda_api,
-                                'VOUCHER_Amount': monto_api,
+                                'VOUCHER_Currency': data.get("total", {}).get("currency", ""),
+                                'VOUCHER_Amount': data.get("total", {}).get("value", 0),
                                 'VOUCHER_Operacion_PSP': 'COMPLETAR_OPERACION',
                                 'VOUCHER_FECHA': 'COMPLETAR_FECHA'
                             })
 
                 st.session_state.trama_final_lista = trama_generada
 
-        else:
-            st.info("No existen operaciones pendientes de regularización para los TINs consultados.")
-
         if st.session_state.trama_final_lista is not None and len(st.session_state.trama_final_lista) > 0:
             st.markdown("---")
             st.subheader("3. Ejecución de Pagos")
+            st.dataframe(pd.DataFrame(st.session_state.trama_final_lista))
             
-            df_preview = pd.DataFrame(st.session_state.trama_final_lista)
-            st.dataframe(df_preview)
+            usuario_op_tab1 = st.text_input("Iniciales del Usuario", value="KNC", key="u1")
             
-            col_u1, col_u2 = st.columns([1, 2])
-            with col_u1:
-                usuario_op_tab1 = st.text_input("Iniciales del Usuario Operativo", value="KNC", key="user_op_tab1")
-            
-            if st.button("Procesar Operaciones", type="primary", key="btn_procesar_tab1"):
-                if not usuario_op_tab1.strip():
-                    st.error("Es obligatorio ingresar las iniciales del usuario operativo.")
-                    st.stop()
-                    
-                if any(t.get('VOUCHER_PSP') == 'COMPLETAR_BANCO' for t in st.session_state.trama_final_lista):
-                    st.error("Se detectaron registros con información incompleta. Ajuste la trama o verifique el archivo de recaudo.")
-                    st.stop()
-
-                with st.spinner("Ejecutando cruce de información y procesamiento de pagos..."):
+            if st.button("Procesar Operaciones", type="primary", key="b1"):
+                with st.spinner("Procesando..."):
                     df_coincidencias = cruzar_invoices_y_vouchers(st.session_state.trama_final_lista, st.session_state.tin_search_results)
-                    
-                    if df_coincidencias.empty:
-                        st.warning("No existen coincidencias válidas para procesar. Verifique posibles discrepancias en montos o divisas.")
-                        st.stop()
-
                     df_resultados = ejecutar_post_pagos(df_coincidencias, usuario_op_tab1)
-
-                st.subheader("Reporte de Resultados")
-                pagos_exitosos = df_resultados[df_resultados['PAGAR_RESPONSE_STATUS'] == 200]
-                pagos_fallidos = df_resultados[df_resultados['PAGAR_RESPONSE_STATUS'] != 200]
-
-                col_res1, col_res2 = st.columns(2)
-                col_res1.metric(label="Operaciones Exitosas", value=len(pagos_exitosos))
-                col_res2.metric(label="Operaciones Fallidas", value=len(pagos_fallidos))
-
-                if not pagos_exitosos.empty:
-                    st.success("Las operaciones fueron procesadas correctamente en el sistema central.")
-                if not pagos_fallidos.empty:
-                    st.error("Se registraron errores durante el procesamiento de algunas operaciones. Revise el detalle.")
-                    
-                st.dataframe(
-                    df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
-                )
+                st.dataframe(df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS']])
 
 # ==========================================
 # PESTAÑA 2: PROCESAMIENTO MANUAL
 # ==========================================
 with tab_pagar:
     st.subheader("Ingreso directo de estructura de datos (Trama)")
-    st.write("Utilice este apartado para procesar transacciones omitiendo el flujo de validación automática documental.")
-    
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        usuario_operacion = st.text_input("Iniciales del Usuario Operativo", value="KNC", key="user_op_tab2")
-    
-    trama_ejemplo = "[{'VOUCHER_PSP':'IBK','VOUCHER_PSP_TIN': '261122515932','VOUCHER_Currency': 'PEN','VOUCHER_Amount': 160,'VOUCHER_Operacion_PSP': '00005843','VOUCHER_FECHA':'46134'}]"
-    trama_texto = st.text_area("Estructura de Vouchers (Formato Lista/Diccionario)", value=trama_ejemplo, height=200)
+    usuario_operacion = st.text_input("Iniciales", value="KNC", key="u2")
+    trama_texto = st.text_area("Trama", height=200)
 
-    if st.button("Procesar Operaciones", type="primary", key="btn_procesar_pagos_tab2"):
-        if not usuario_operacion.strip():
-            st.error("Es obligatorio ingresar las iniciales del usuario operativo.")
-            st.stop()
-            
-        if not trama_texto.strip():
-            st.error("El campo de estructura no puede encontrarse vacío.")
-            st.stop()
-
-        try:
-            data_voucher_manual = ast.literal_eval(trama_texto)
-            if isinstance(data_voucher_manual, dict):
-                data_voucher_manual = [data_voucher_manual]
-            if not isinstance(data_voucher_manual, list) or len(data_voucher_manual) == 0:
-                raise ValueError("El formato provisto no cumple con la estructura requerida.")
-        except Exception as e:
-            st.error(f"Error de validación de estructura: {e}")
-            st.stop()
-
+    if st.button("Procesar", type="primary", key="b2"):
+        data_voucher_manual = ast.literal_eval(trama_texto)
+        if isinstance(data_voucher_manual, dict): data_voucher_manual = [data_voucher_manual]
+        
         df_voucher_prev = pd.DataFrame(data_voucher_manual)
-        with st.expander("Detalle de registros a procesar", expanded=False):
-            st.dataframe(df_voucher_prev)
-
-        with st.spinner("Validando registros con el sistema central..."):
-            tin_list_manual = df_voucher_prev['VOUCHER_PSP_TIN'].dropna().unique().tolist()
-            api_results_manual = consultar_api_tins(tin_list_manual)
-            
+        
+        with st.spinner("Procesando..."):
+            api_results_manual = consultar_api_tins(df_voucher_prev['VOUCHER_PSP_TIN'].tolist())
             df_coincidencias = cruzar_invoices_y_vouchers(data_voucher_manual, api_results_manual)
-
-            if df_coincidencias.empty:
-                st.warning("Validación denegada: Discrepancias detectadas o los comprobantes se encuentran en estado liquidado.")
-                st.stop()
-
-        with st.spinner("Procesando transacciones..."):
             df_resultados = ejecutar_post_pagos(df_coincidencias, usuario_operacion)
 
-        st.subheader("Reporte de Resultados")
-        pagos_exitosos = df_resultados[df_resultados['PAGAR_RESPONSE_STATUS'] == 200]
-        pagos_fallidos = df_resultados[df_resultados['PAGAR_RESPONSE_STATUS'] != 200]
-
-        col_res1, col_res2 = st.columns(2)
-        col_res1.metric(label="Operaciones Exitosas", value=len(pagos_exitosos))
-        col_res2.metric(label="Operaciones Fallidas", value=len(pagos_fallidos))
-
-        if not pagos_exitosos.empty:
-            st.success("Las operaciones fueron procesadas correctamente.")
-        if not pagos_fallidos.empty:
-            st.error("Se registraron anomalías en el procesamiento. Verifique los códigos de estado.")
-            
-        st.dataframe(
-            df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS', 'INVOICE_AMOUNT', 'INVOICE_CURRENCY']]
-        )
+        st.dataframe(df_resultados[['VOUCHER_PSP_TIN', 'PAGAR_RESPONSE_STATUS']])
 
 # ==================================================
 # PESTAÑA 3: CONSULTAR TIN (Mapeo dinámico a Tabla)
@@ -571,7 +434,6 @@ with tab_consultar_tin_main:
 
     if st.session_state.tin_search_results:
         tabla_rows = []
-        trama_tab2_lines = []
         
         now = datetime.now()
         fecha_revision = now.strftime("%d/%m/%Y")
@@ -625,8 +487,6 @@ with tab_consultar_tin_main:
                 }
                 tabla_rows.append(row)
                 
-                trama_line = f"{{'VOUCHER_PSP':'{banco}','VOUCHER_PSP_TIN': '{t}','VOUCHER_Currency': '{pen}','VOUCHER_Amount': {monto_voucher},'VOUCHER_Operacion_PSP': '{nro_op}','VOUCHER_FECHA':'{voucher_fecha}'}},"
-                trama_tab2_lines.append(trama_line)
             else:
                 row = {
                     "Tipo": "Reg.Interna",
@@ -652,9 +512,35 @@ with tab_consultar_tin_main:
         
         if tabla_rows:
             df_tabla = pd.DataFrame(tabla_rows)
-            st.markdown("### 📋 Tabla de Conciliación (Copiable)")
-            st.dataframe(df_tabla, use_container_width=True)
+            st.markdown("### 📋 Tabla de Conciliación (Editable)")
+            st.caption("💡 **Para eliminar una fila:** Selecciona la casilla a la izquierda de la fila y presiona la tecla 'Suprimir' (Delete), o usa el ícono de la papelera en la esquina superior derecha de la tabla.")
             
+            # Tabla interactiva (permite eliminar filas)
+            df_editado = st.data_editor(
+                df_tabla, 
+                num_rows="dynamic", 
+                use_container_width=True, 
+                key="editor_tab3"
+            )
+            
+            # Generación del archivo Excel en memoria
+            excel_buffer = BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df_editado.to_excel(writer, index=False, sheet_name='Conciliacion')
+            
+            st.download_button(
+                label="📥 Descargar Tabla en Excel (.xlsx)",
+                data=excel_buffer.getvalue(),
+                file_name=f"Conciliacion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+            # Recálculo dinámico de la trama basado en la tabla editada
+            trama_dinamica = []
+            for _, row in df_editado.iterrows():
+                trama_line = f"{{'VOUCHER_PSP':'{row['Banco']}','VOUCHER_PSP_TIN': '{row['PSP_TIN']}','VOUCHER_Currency': '{row['PEN']}','VOUCHER_Amount': {row['Monto voucher']},'VOUCHER_Operacion_PSP': '{row['Nro OP']}','VOUCHER_FECHA':'{row['VOUCHER_FECHA']}'}},"
+                trama_dinamica.append(trama_line)
+                
             st.markdown("### 🔗 Trama de salida para la Pestaña 2")
-            trama_completa_str = "\n".join(trama_tab2_lines)
+            trama_completa_str = "\n".join(trama_dinamica)
             st.text_area("Copia estas líneas y pégalas directamente dentro del cuadro de texto de la Pestaña 2:", value=trama_completa_str, height=180)
