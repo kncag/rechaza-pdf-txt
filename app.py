@@ -29,7 +29,7 @@ DICT_ACC = {
     ('BILLETERA-GMONEY', 'PEN'): 'acc_24205fe371034deb9731',
 }
 
-for key in ["df_conciliacion", "trama_generada", "alertas_pagados", "raw_api_results"]:
+for key in ["df_conciliacion", "trama_generada", "alertas_pagados", "raw_api_results", "lineas_no_leidas"]:
     if key not in st.session_state:
         st.session_state[key] = pd.DataFrame() if key == "df_conciliacion" else ([] if key != "trama_generada" else "")
 
@@ -88,56 +88,101 @@ def ejecutar_post_pagos(payload_list, usuario_operacion):
     return pd.DataFrame(resultados)
 
 
-def procesar_archivo_bancario(file_content, filename):
+def _fecha_serial(yyyymmdd):
+    dt = datetime.strptime(yyyymmdd, "%Y%m%d")
+    return str((dt - datetime(1899, 12, 30)).days)
+
+
+def _parsear_bcp(line):
+    # TIN: 12 dígitos tras el último " 00000000". Bloque de 73 dígitos antes de "EFECTIVO":
+    # FECHA1[0:8] FECHA2[8:16] ... OPERACION[61:73] (los últimos 6 son el Nro OP).
+    tins = re.findall(r' 0{8}(\d{12})', line)
+    blk = re.search(r'(\d{73})EFECTIVO', line)
+    if not tins or not blk:
+        return None
+    b = blk.group(1)
+    return {
+        'tin': tins[-1],
+        'VOUCHER_Operacion_PSP': b[67:73],
+        'VOUCHER_FECHA': _fecha_serial(b[0:8]),
+    }
+
+
+def _parsear_ibk(line):
+    # TIN: 12 dígitos delimitados por espacios. Fecha: primera "2026xxxx".
+    # Operación/Referencia: 8 dígitos tras la última fecha "2026xxxx" de la línea.
+    mt = re.search(r'\s(\d{12})\s', line)
+    fechas = list(re.finditer(r'2026\d{4}', line))
+    if not mt or not fechas:
+        return None
+    ref = line[fechas[-1].end():fechas[-1].end() + 8]
+    if not re.fullmatch(r'\d{8}', ref):
+        return None
+    return {
+        'tin': mt.group(1),
+        'VOUCHER_Operacion_PSP': ref.lstrip('0'),
+        'VOUCHER_FECHA': _fecha_serial(fechas[0].group()),
+    }
+
+
+def _parsear_bbva(line):
+    # TIN: 12 dígitos antes de " 0841". Cuerpo de 81 chars desde "0841":
+    # REFERENCIA[54:60] FECHA[65:73] CANAL[73:81].
+    m = re.search(r'(\d{12})\s+(0841.{77})', line)
+    if not m:
+        return None
+    tin, b = m.group(1), m.group(2)
+    return {
+        'tin': tin,
+        'VOUCHER_Operacion_PSP': b[54:60].lstrip('0'),
+        'VOUCHER_FECHA': _fecha_serial(b[65:73]),
+    }
+
+
+def procesar_archivo_bancario(file_content):
     lines = re.sub(r'[^\x20-\x7E\r\n]', ' ', file_content.decode("latin-1", errors="replace")).splitlines()
     if not lines:
-        return {}
+        return {}, []
 
-    banco, moneda = "DESCONOCIDO", "PEN"
+    banco = "DESCONOCIDO"
     first = lines[0]
     if first.startswith("0120"):
-        banco, moneda = "BBVA", "USD" if "USD" in first[16:25] else "PEN"
-    elif first.startswith("0791501"):
-        banco, moneda = "IBK", "PEN"
-    elif first.startswith("0791502"):
-        banco, moneda = "IBK", "USD"
+        banco = "BBVA"
+    elif first.startswith(("0791501", "0791502")):
+        banco = "IBK"
     elif first.startswith("CC"):
-        banco, moneda = "BCP", "USD" if "1941" in first[0:15] or "DOLARES" in filename.upper() else "PEN"
+        banco = "BCP"
+
+    parsers = {"BCP": _parsear_bcp, "IBK": _parsear_ibk, "BBVA": _parsear_bbva}
+    detalle = {"BCP": "DD", "IBK": ("0791501", "0791502"), "BBVA": "02"}.get(banco)
+    parser = parsers.get(banco)
 
     parsed_data = {}
-    for line in lines:
-        tin = date_str = amount_str = op_str = None
-        if banco == "IBK" and line.startswith(("0791501", "0791502")) and len(line) >= 149:
-            tin, date_str, amount_str, op_str = line[37:49], line[82:90], line[96:109], line[141:149]
-        elif banco == "BBVA" and line.startswith("02") and len(line) >= 140:
-            tin, date_str, amount_str, op_str = line[48:60], line[135:143], line[80:95], line[70:80]
-        elif banco == "BCP" and line.startswith("DD") and len(line) >= 150:
-            tin, date_str, amount_str, op_str = line[15:27], line[57:65], line[73:88], line[143:149]
+    no_leidas = []
+    if not parser:
+        return parsed_data, no_leidas
 
-        if tin:
-            tin_c = re.sub(r'[^\d]', '', tin)
-            date_c = re.sub(r'[^\d]', '', date_str)
-            amount_c = re.sub(r'[^\d]', '', amount_str)
-            if tin_c and date_c and amount_c:
-                try:
-                    dt = datetime.strptime(date_c, "%Y%m%d")
-                    parsed_data[tin_c] = {
-                        'VOUCHER_PSP': banco,
-                        'VOUCHER_Currency': moneda,
-                        'VOUCHER_Amount': float(amount_c) / 100.0,
-                        'VOUCHER_Operacion_PSP': op_str.strip(),
-                        'VOUCHER_FECHA': str((dt - datetime(1899, 12, 30)).days)
-                    }
-                except ValueError:
-                    pass
-    return parsed_data
+    for line in lines:
+        if not line.startswith(detalle):
+            continue
+        try:
+            campos = parser(line)
+            if campos is None:
+                raise ValueError("estructura no reconocida")
+            tin = campos.pop('tin')
+            parsed_data[tin] = {'VOUCHER_PSP': banco, **campos}
+        except Exception:
+            no_leidas.append(line.rstrip())
+
+    return parsed_data, no_leidas
 
 
 def consolidar_datos_tabla(resultados_api, datos_txt):
     filas = []
     pagados = []
-    fecha_rev = datetime.now().strftime("%d/%m/%Y")
-    mes_rev = datetime.now().strftime("%B")
+    ahora = datetime.now()
+    fecha_rev = f"{ahora.month}/{ahora.day}/{ahora.year}"
+    mes_rev = ahora.strftime("%B")
 
     COLUMN_ORDER = [
         "Tipo", "Tipo2", "Empresa", "Fecha de revision", "Mes",
@@ -244,13 +289,17 @@ if btn_consulta:
         st.warning("No se identificaron códigos TIN con la longitud requerida (12 dígitos).")
     else:
         lista_unica = list(dict.fromkeys(tins_validos))
-        datos_txt = procesar_archivo_bancario(archivo_txt.getvalue(), archivo_txt.name) if archivo_txt else {}
+        if archivo_txt:
+            datos_txt, lineas_no_leidas = procesar_archivo_bancario(archivo_txt.getvalue())
+        else:
+            datos_txt, lineas_no_leidas = {}, []
         with st.spinner("Conectando al sistema central..."):
             res_api = consultar_api_tins(lista_unica)
             df_final, pagados = consolidar_datos_tabla(res_api, datos_txt)
             st.session_state.df_conciliacion = df_final
             st.session_state.alertas_pagados = pagados
             st.session_state.raw_api_results = res_api
+            st.session_state.lineas_no_leidas = lineas_no_leidas
 
 if btn_json:
     if not st.session_state.raw_api_results:
@@ -270,8 +319,28 @@ if not st.session_state.df_conciliacion.empty:
     if st.session_state.alertas_pagados:
         st.warning(f"Se identificaron {len(st.session_state.alertas_pagados)} operaciones con estado previo de liquidación (PAID): {', '.join(st.session_state.alertas_pagados)}")
 
+    if st.session_state.lineas_no_leidas:
+        n = len(st.session_state.lineas_no_leidas)
+        with st.expander(f"⚠️ {n} línea(s) del archivo bancario no pudieron leerse — revisar manualmente", expanded=True):
+            st.caption("Estas líneas no coincidieron con la estructura esperada del banco y NO se incluyeron en la conciliación.")
+            for ln in st.session_state.lineas_no_leidas:
+                st.code(ln, language=None)
+
     df_estilizado = st.session_state.df_conciliacion.style.apply(aplicar_alertas_tabla, axis=1)
     df_editado = st.data_editor(df_estilizado, num_rows="dynamic", width='stretch')
+
+    montos = pd.to_numeric(df_editado.get("Monto voucher"), errors="coerce")
+    montos_k = pd.to_numeric(df_editado.get("Monto Kashio"), errors="coerce")
+    balances = pd.to_numeric(df_editado.get("Balance"), errors="coerce")
+    n_monto = int(((montos > 500) | (montos_k > 500)).sum())
+    n_balance = int((balances.abs() > 5).sum())
+    if n_monto or n_balance:
+        avisos = []
+        if n_monto:
+            avisos.append(f"{n_monto} operación(es) con Monto voucher o Monto Kashio mayor a 500")
+        if n_balance:
+            avisos.append(f"{n_balance} operación(es) con Balance mayor a 5")
+        st.error("⚠️ " + " · ".join(avisos) + ". Revisar antes de ejecutar.")
 
     trama_texto_vivo = extraer_trama_desde_df(df_editado)
     st.session_state.trama_generada = trama_texto_vivo
