@@ -234,9 +234,9 @@ with col_b:
 
 col_btn1, col_btn2, col_spacer = st.columns([1.5, 1.5, 7])
 with col_btn1:
-    btn_consulta = st.button("Ejecutar Consulta", type="primary", use_container_width=True)
+    btn_consulta = st.button("Ejecutar Consulta", type="primary", width=True)
 with col_btn2:
-    btn_json = st.button("Revisar Respuestas JSON", type="secondary", use_container_width=True)
+    btn_json = st.button("Revisar Respuestas JSON", type="secondary", width=True)
 
 if btn_consulta:
     candidatos = re.findall(r'\d+', input_tins)
@@ -272,7 +272,7 @@ if not st.session_state.df_conciliacion.empty:
         st.warning(f"Se identificaron {len(st.session_state.alertas_pagados)} operaciones con estado previo de liquidación (PAID): {', '.join(st.session_state.alertas_pagados)}")
 
     df_estilizado = st.session_state.df_conciliacion.style.apply(aplicar_alertas_tabla, axis=1)
-    df_editado = st.data_editor(df_estilizado, num_rows="dynamic", use_container_width=True)
+    df_editado = st.data_editor(df_estilizado, num_rows="dynamic", width=True)
 
     trama_texto_vivo = extraer_trama_desde_df(df_editado)
     st.session_state.trama_generada = trama_texto_vivo
@@ -293,7 +293,7 @@ if not st.session_state.df_conciliacion.empty:
         else:
             with st.spinner("Procesando operaciones automáticas..."):
                 df_resultados = ejecutar_post_pagos(payload_auto, usuario_operador)
-                st.dataframe(df_resultados, use_container_width=True)
+                st.dataframe(df_resultados, width=True)
                 st.success("Flujo automático completado.")
 
     st.markdown("---")
@@ -307,7 +307,7 @@ if not st.session_state.df_conciliacion.empty:
                 raise ValueError("Estructura vacía.")
             with st.spinner("Procesando operaciones manuales..."):
                 df_resultados = ejecutar_post_pagos(payload_manual, usuario_operador)
-                st.dataframe(df_resultados, use_container_width=True)
+                st.dataframe(df_resultados, width=True)
                 st.success("Flujo manual completado.")
         except Exception as e:
             st.error(f"Error de validación estructural: {e}")
