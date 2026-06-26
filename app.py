@@ -140,6 +140,13 @@ def consolidar_datos_tabla(resultados_api, datos_txt):
     fecha_rev = datetime.now().strftime("%d/%m/%Y")
     mes_rev = datetime.now().strftime("%B")
 
+    COLUMN_ORDER = [
+        "Tipo", "Tipo2", "Empresa", "Fecha de revision", "Mes",
+        "PSP_TIN", "PSP_TIN concatenado", "Estado", "Public ID",
+        "inv_id concatenado", "PEN", "Monto voucher", "Monto Kashio",
+        "Balance", "CANAL", "Banco", "Nro OP", "VOUCHER_FECHA"
+    ]
+
     for res in resultados_api:
         t, d = res["tin"], res["data"]
         info_txt = datos_txt.get(t, {})
@@ -175,7 +182,8 @@ def consolidar_datos_tabla(resultados_api, datos_txt):
                 "Public ID": "N/A", "inv_id concatenado": "N/A", "PEN": "N/A",
                 "Monto voucher": 0.0, "Monto Kashio": 0.0, "Balance": 0.0,
             })
-    return pd.DataFrame(filas), pagados
+
+    return pd.DataFrame(filas)[COLUMN_ORDER], pagados
 
 
 def extraer_trama_desde_df(df):
