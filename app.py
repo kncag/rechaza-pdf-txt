@@ -126,9 +126,9 @@ def _parsear_ibk(line):
 
 
 def _parsear_bbva(line):
-    # TIN: 12 dígitos antes de " 0841". Cuerpo de 81 chars desde "0841":
+    # TIN: 12 dígitos antes del código de servicio "084x". Cuerpo de 81 chars desde "084x":
     # REFERENCIA[54:60] FECHA[65:73] CANAL[73:81].
-    m = re.search(r'(\d{12})\s+(0841.{77})', line)
+    m = re.search(r'(\d{12})\s+(084\d.{76})', line)
     if not m:
         return None
     tin, b = m.group(1), m.group(2)
