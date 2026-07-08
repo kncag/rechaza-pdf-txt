@@ -217,7 +217,7 @@ def consolidar_datos_tabla(resultados_api, datos_txt):
                 "inv_id concatenado": f"'{d.get('public_id', 'N/A')}',",
                 "PEN": d.get("sub_total", {}).get("currency", "N/A"),
                 "Monto voucher": monto_voucher, "Monto Kashio": monto_kashio,
-                "Balance": monto_voucher - monto_kashio,
+                "Balance": monto_kashio - monto_voucher,
             })
         else:
             filas.append({**base,
