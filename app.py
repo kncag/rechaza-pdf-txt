@@ -126,16 +126,22 @@ def _parsear_ibk(line):
 
 
 def _parsear_bbva(line):
-    # TIN: 12 dígitos antes del código de servicio "084x". Cuerpo de 81 chars desde "084x":
-    # REFERENCIA[54:60] FECHA[65:73] CANAL[73:81].
-    m = re.search(r'(\d{12})\s+(084\d.{76})', line)
-    if not m:
+    # TIN: 12 dígitos antes del código de servicio. Fecha: última "2026xxxx" de la línea.
+    # Referencia: 6 dígitos que terminan 5 posiciones antes del inicio de la fecha.
+    # Se ancla en la cola (fecha) porque el código de servicio varía en prefijo (084x/085x)
+    # y en longitud, lo que desplaza los offsets absolutos.
+    mt = re.search(r'(\d{12})\s+\d{4}', line)
+    fechas = list(re.finditer(r'2026\d{4}', line))
+    if not mt or not fechas:
         return None
-    tin, b = m.group(1), m.group(2)
+    fpos = fechas[-1].start()
+    ref = line[fpos - 11:fpos - 5]
+    if not re.fullmatch(r'\d{6}', ref):
+        return None
     return {
-        'tin': tin,
-        'VOUCHER_Operacion_PSP': b[54:60].lstrip('0'),
-        'VOUCHER_FECHA': _fecha_serial(b[65:73]),
+        'tin': mt.group(1),
+        'VOUCHER_Operacion_PSP': ref.lstrip('0'),
+        'VOUCHER_FECHA': _fecha_serial(fechas[-1].group()),
     }
 
 
